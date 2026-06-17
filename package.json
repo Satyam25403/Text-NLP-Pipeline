@@ -1,0 +1,9 @@
+{
+  "name": "nlp-pipeline",
+  "version": "1.0.0",
+  "description": "Text NLP Pipeline - NewsAPI ingestion, enrichment, and search",
+  "private": true,
+  "workspaces": [
+    "functions"
+  ]
+}
