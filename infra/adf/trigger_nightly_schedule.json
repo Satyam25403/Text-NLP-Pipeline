@@ -1,0 +1,25 @@
+{
+  "name": "NightlyScheduleTrigger",
+  "properties": {
+    "description": "Fires the NLP pipeline nightly at 02:00 UTC. Ingestion (Logic App) runs at 00:00, 06:00, 12:00, 18:00 — so by 02:00 the previous day's silver layer is fully populated.",
+    "type": "ScheduleTrigger",
+    "typeProperties": {
+      "recurrence": {
+        "frequency": "Day",
+        "interval": 1,
+        "startTime": "2024-01-01T02:00:00Z",
+        "timeZone": "UTC"
+      }
+    },
+    "pipelines": [
+      {
+        "pipelineReference": {
+          "referenceName": "nlp_pipeline_nightly",
+          "type": "PipelineReference"
+        },
+        "parameters": {}
+      }
+    ],
+    "annotations": ["nlp-pipeline", "nightly"]
+  }
+}

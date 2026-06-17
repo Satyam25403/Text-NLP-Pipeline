@@ -1,0 +1,137 @@
+{
+  "name": "nlp_pipeline_nightly",
+  "properties": {
+    "description": "Nightly batch orchestration: ingestion check → Databricks gold → Search index refresh",
+    "activities": [
+
+      {
+        "name": "CheckSilverCompleteness",
+        "description": "Verify silver layer has data before running gold aggregation",
+        "type": "GetMetadata",
+        "dependsOn": [],
+        "policy": { "timeout": "0.00:05:00", "retry": 1 },
+        "typeProperties": {
+          "dataset": {
+            "referenceName": "SilverContainerDataset",
+            "type": "DatasetReference"
+          },
+          "fieldList": ["childItems"],
+          "storeSettings": {
+            "type": "AzureBlobFSReadSettings",
+            "recursive": false
+          }
+        }
+      },
+
+      {
+        "name": "FailIfSilverEmpty",
+        "description": "Fail the pipeline early if no silver data was found",
+        "type": "IfCondition",
+        "dependsOn": [
+          { "activity": "CheckSilverCompleteness", "dependencyConditions": ["Succeeded"] }
+        ],
+        "typeProperties": {
+          "expression": {
+            "value": "@equals(length(activity('CheckSilverCompleteness').output.childItems), 0)",
+            "type": "Expression"
+          },
+          "ifTrueActivities": [
+            {
+              "name": "RaiseSilverEmptyError",
+              "type": "Fail",
+              "typeProperties": {
+                "message": "Silver container is empty — skipping gold aggregation",
+                "errorCode": "SILVER_EMPTY"
+              }
+            }
+          ]
+        }
+      },
+
+      {
+        "name": "RunGoldAggregation",
+        "description": "Databricks notebook: compute sentiment trends, top entities, trending keywords",
+        "type": "DatabricksNotebook",
+        "dependsOn": [
+          { "activity": "FailIfSilverEmpty", "dependencyConditions": ["Succeeded"] }
+        ],
+        "policy": { "timeout": "0.02:00:00", "retry": 1, "retryIntervalInSeconds": 300 },
+        "linkedServiceName": { "referenceName": "DatabricksLinkedService", "type": "LinkedServiceReference" },
+        "typeProperties": {
+          "notebookPath": "/Shared/nlp-pipeline/gold_aggregation",
+          "baseParameters": {
+            "run_date":       { "value": "@formatDateTime(adddays(utcNow(), -1), 'yyyy-MM-dd')", "type": "Expression" },
+            "silver_root":    { "value": "@pipeline().parameters.silverRoot",    "type": "Expression" },
+            "gold_root":      { "value": "@pipeline().parameters.goldRoot",      "type": "Expression" },
+            "lookback_days":  "7",
+            "keyword_window": "3"
+          }
+        }
+      },
+
+      {
+        "name": "RefreshSearchIndex",
+        "description": "Push yesterday's silver docs to Azure AI Search via fn-index-refresh",
+        "type": "WebActivity",
+        "dependsOn": [
+          { "activity": "RunGoldAggregation", "dependencyConditions": ["Succeeded"] }
+        ],
+        "policy": { "timeout": "0.00:30:00", "retry": 2, "retryIntervalInSeconds": 60 },
+        "typeProperties": {
+          "url": {
+            "value": "@concat(pipeline().parameters.indexRefreshUrl, '?code=', pipeline().parameters.indexRefreshKey)",
+            "type": "Expression"
+          },
+          "method": "POST",
+          "headers": { "Content-Type": "application/json" },
+          "body": {
+            "value": "@concat('{\"date\":\"', formatDateTime(adddays(utcNow(),-1),'yyyy-MM-dd'), '\"}')",
+            "type": "Expression"
+          },
+          "authentication": { "type": "Anonymous" }
+        }
+      },
+
+      {
+        "name": "CheckIndexRefreshResult",
+        "description": "Fail pipeline if Search index refresh returned a non-200 status",
+        "type": "IfCondition",
+        "dependsOn": [
+          { "activity": "RefreshSearchIndex", "dependencyConditions": ["Succeeded"] }
+        ],
+        "typeProperties": {
+          "expression": {
+            "value": "@greaterOrEquals(activity('RefreshSearchIndex').output.statusCode, 400)",
+            "type": "Expression"
+          },
+          "ifTrueActivities": [
+            {
+              "name": "RaiseIndexError",
+              "type": "Fail",
+              "typeProperties": {
+                "message": {
+                  "value": "@concat('Index refresh failed with status: ', string(activity('RefreshSearchIndex').output.statusCode))",
+                  "type": "Expression"
+                },
+                "errorCode": "INDEX_REFRESH_FAILED"
+              }
+            }
+          ]
+        }
+      }
+    ],
+
+    "parameters": {
+      "silverRoot":      { "type": "string", "defaultValue": "abfss://articles-silver@<account>.dfs.core.windows.net" },
+      "goldRoot":        { "type": "string", "defaultValue": "abfss://articles-gold@<account>.dfs.core.windows.net" },
+      "indexRefreshUrl": { "type": "string", "defaultValue": "https://<fn-app>.azurewebsites.net/api/fn-index-refresh" },
+      "indexRefreshKey": { "type": "string", "defaultValue": "" }
+    },
+
+    "annotations": ["nlp-pipeline", "nightly", "gold-aggregation"],
+
+    "policy": {
+      "elapsedTimeMetric": { "duration": "0.03:00:00" }
+    }
+  }
+}

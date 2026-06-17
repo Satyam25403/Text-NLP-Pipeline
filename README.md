@@ -114,16 +114,20 @@ nlp-pipeline/
 ├── infra/                             # Azure infrastructure as code
 │   ├── main.bicep                     # Entry point — calls all modules
 │   ├── parameters.json                # Environment parameters
-│   └── modules/
-│       ├── storage.bicep              # Blob Storage + ADLS Gen2 + Table Storage + Queue
-│       ├── functions.bicep            # All Function Apps (one app, multiple functions)
-│       ├── logic-app.bicep            # Logic App workflow definition
-│       ├── eventgrid.bicep            # Event Grid subscription
-│       ├── cognitive.bicep            # Language API + Azure OpenAI
-│       ├── databricks.bicep           # Databricks workspace
-│       ├── search.bicep               # Azure AI Search + index schema
-│       ├── apim.bicep                 # APIM instance + API + policies
-│       └── purview.bicep              # Purview account + scan rules
+│   ├── modules/                       # Bicep resource provisioning (one file per resource)
+│   │   ├── storage.bicep              # Blob Storage + ADLS Gen2 + Table Storage + Queue
+│   │   ├── functions.bicep            # All Function Apps (one app, multiple functions)
+│   │   ├── logic-app.bicep            # Logic App workflow definition
+│   │   ├── eventgrid.bicep            # Event Grid subscription
+│   │   ├── cognitive.bicep            # Language API + Azure OpenAI
+│   │   ├── databricks.bicep           # Databricks workspace
+│   │   ├── search.bicep               # Azure AI Search + index schema
+│   │   ├── apim.bicep                 # APIM instance + API + policies
+│   │   └── purview.bicep              # Purview account + scan rules
+│   └── adf/                           # ADF artifacts — deployed via az datafactory CLI, NOT Bicep
+│       ├── pipeline_nlp_nightly.json      # 5-activity nightly pipeline
+│       ├── dataset_silver_container.json  # SilverContainerDataset (used by GetMetadata activity)
+│       └── trigger_nightly_schedule.json  # Daily 02:00 UTC schedule trigger
 │
 ├── functions/                         # Azure Functions App (Node.js)
 │   ├── package.json
@@ -375,10 +379,17 @@ Response:
 5. Deploy `infra/modules/logic-app.bicep` (Logic App with NewsAPI connection)
 6. Run `scripts/create-index.js` (create AI Search index)
 7. Deploy `infra/modules/search.bicep`
-8. Deploy `infra/modules/databricks.bicep` + upload notebooks
-9. Deploy `infra/modules/apim.bicep` + apply policies
-10. Deploy `infra/modules/purview.bicep` + configure scans
-11. Run `scripts/test-pipeline.js` (end-to-end smoke test)
+8. Deploy `infra/modules/databricks.bicep` + upload `databricks/gold_aggregation.py` notebook
+9. Deploy ADF artifacts in order (dataset before pipeline before trigger):
+   ```bash
+   az datafactory dataset create   --factory-name <adf> -g <rg> --dataset-name SilverContainerDataset --properties @infra/adf/dataset_silver_container.json
+   az datafactory pipeline create  --factory-name <adf> -g <rg> --pipeline-name nlp_pipeline_nightly  --pipeline    @infra/adf/pipeline_nlp_nightly.json
+   az datafactory trigger create   --factory-name <adf> -g <rg> --trigger-name NightlyScheduleTrigger --properties @infra/adf/trigger_nightly_schedule.json
+   az datafactory trigger start    --factory-name <adf> -g <rg> --trigger-name NightlyScheduleTrigger
+   ```
+10. Deploy `infra/modules/apim.bicep` + apply policies
+11. Deploy `infra/modules/purview.bicep` + configure scans
+12. Run `scripts/test-pipeline.js` (end-to-end smoke test)
 
 ---
 

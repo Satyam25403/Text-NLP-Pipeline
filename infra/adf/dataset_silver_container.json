@@ -1,0 +1,18 @@
+{
+  "name": "SilverContainerDataset",
+  "properties": {
+    "description": "ADLS Gen2 silver layer — enriched articles. Used by ADF GetMetadata activity to check completeness before running gold aggregation.",
+    "linkedServiceName": {
+      "referenceName": "AzureDataLakeStorageLinkedService",
+      "type": "LinkedServiceReference"
+    },
+    "type": "Json",
+    "typeProperties": {
+      "location": {
+        "type": "AzureBlobFSLocation",
+        "fileSystem": "articles-silver"
+      }
+    },
+    "annotations": ["nlp-pipeline", "silver"]
+  }
+}
