@@ -1,0 +1,40 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "FUNCTIONS_WORKER_RUNTIME": "node",
+    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+
+    "LOG_LEVEL": "debug",
+
+    "NEWSAPI_KEY": "<your-newsapi-key-from-newsapi.org>",
+
+    "AZURE_STORAGE_CONNECTION_STRING": "UseDevelopmentStorage=true",
+    "BLOB_CONTAINER_BRONZE": "articles-bronze",
+    "BLOB_CONTAINER_SILVER": "articles-silver",
+    "ADLS_CONTAINER_GOLD": "articles-gold",
+    "TABLE_DEDUP": "articleDedup",
+    "TABLE_AUDIT": "articleAudit",
+    "QUEUE_ENRICH": "article-enrich-queue",
+
+    "LANGUAGE_ENDPOINT": "https://<your-resource>.cognitiveservices.azure.com/",
+    "LANGUAGE_API_KEY": "<your-language-api-key>",
+    "LANGUAGE_API_VERSION": "2023-04-01",
+
+    "OPENAI_ENDPOINT": "https://<your-resource>.openai.azure.com/",
+    "OPENAI_API_KEY": "<your-openai-api-key>",
+    "OPENAI_EMBEDDING_DEPLOYMENT": "text-embedding-ada-002",
+
+    "SEARCH_ENDPOINT": "https://<your-resource>.search.windows.net",
+    "SEARCH_API_KEY": "<your-search-admin-key>",
+    "SEARCH_INDEX_NAME": "articles",
+
+    "APIM_ENDPOINT": "https://<your-apim>.azure-api.net",
+    "APIM_SUBSCRIPTION_KEY": "<your-subscription-key>",
+
+    "DATABRICKS_HOST": "https://<workspace>.azuredatabricks.net",
+    "DATABRICKS_TOKEN": "<your-databricks-pat>",
+    "DATABRICKS_CLUSTER_ID": "<your-cluster-id>",
+
+    "APPINSIGHTS_INSTRUMENTATIONKEY": "<your-app-insights-key>"
+  }
+}
