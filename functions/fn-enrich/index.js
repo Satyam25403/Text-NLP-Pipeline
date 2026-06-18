@@ -33,16 +33,17 @@
  */
 
 const { readJson, writeJson, exists, buildBlobPath } = require('../shared/blobClient');
-const { enrichArticles }                              = require('../shared/languageClient');
+const { enrichArticles, hasPii }                      = require('../shared/languageClient');
 const { embedText, buildEmbeddingInput }              = require('../shared/openaiClient');
 const { markIngested, logAuditEvent }                 = require('../shared/tableClient');
+const { CONTAINERS }                                  = require('../shared/config');
 const createLogger                                    = require('../shared/logger');
 
 const log = createLogger('fn-enrich');
 
-const BRONZE_CONTAINER = process.env.BLOB_CONTAINER_BRONZE ?? 'articles-bronze';
-const SILVER_CONTAINER = process.env.BLOB_CONTAINER_SILVER ?? 'articles-silver';
-const ERROR_CONTAINER  = 'articles-error';
+const BRONZE_CONTAINER = CONTAINERS.BRONZE;
+const SILVER_CONTAINER = CONTAINERS.SILVER;
+const ERROR_CONTAINER  = CONTAINERS.ERROR;
 
 // Max chars to store as body_snippet in the silver layer + Search index
 const BODY_SNIPPET_MAX = 500;
@@ -200,8 +201,6 @@ function _dateFromBlobPath(blobPath) {
  * Build the silver layer document from all enrichment results.
  */
 function _buildSilverDoc({ rawArticle, urlHash, category, ingestedAt, bodySnippet, nlpResult, embeddingResult }) {
-  const { hasPii } = require('../shared/languageClient');
-
   return {
     // Identity
     id:          urlHash,
@@ -210,7 +209,7 @@ function _buildSilverDoc({ rawArticle, urlHash, category, ingestedAt, bodySnippe
     body_snippet: bodySnippet           ?? null,
     source:      rawArticle.source?.name ?? rawArticle.source ?? null,
     category,
-    published_at: rawArticle.publishedAt ?? rawArticle.published_at ?? null,
+    publishedAt: rawArticle.publishedAt ?? null,
     author:      rawArticle.author       ?? null,
 
     // NLP

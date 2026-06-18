@@ -23,16 +23,17 @@
  * Documents are keyed on `id` (url_hash) so re-runs overwrite not duplicate.
  */
 
-const { listBlobs, readJson } = require('../shared/blobClient');
-const { upsertDocuments }      = require('../shared/searchClient');
-const createLogger             = require('../shared/logger');
+const { listBlobs, readJson }          = require('../shared/blobClient');
+const { upsertDocuments }              = require('../shared/searchClient');
+const { INGEST_CATEGORIES, CONTAINERS } = require('../shared/config');
+const createLogger                     = require('../shared/logger');
 
 const log = createLogger('fn-index-refresh');
 
-const SILVER_CONTAINER = process.env.BLOB_CONTAINER_SILVER ?? 'articles-silver';
+const SILVER_CONTAINER = CONTAINERS.SILVER;
 
-// All categories we ingest — used when no category filter is supplied
-const ALL_CATEGORIES = ['technology', 'business', 'science', 'health'];
+// Driven by shared config — add categories there, not here
+const ALL_CATEGORIES = INGEST_CATEGORIES;
 
 module.exports = async function (context, req) {
   const startedAt = Date.now();
@@ -166,7 +167,7 @@ function _mapToSearchDoc(doc) {
     body_snippet:    doc.body_snippet    ?? null,
     source:          doc.source          ?? null,
     category:        doc.category        ?? null,
-    published_at:    doc.published_at    ?? null,
+    published_at:    doc.publishedAt     ?? doc.published_at ?? null,
     sentiment_label: doc.sentiment?.label ?? null,
     sentiment_score: doc.sentiment?.scores?.positive ?? null,
     entities:        (doc.entities ?? []).map(e => e.text),   // Search stores string[]

@@ -25,14 +25,15 @@
  * }
  */
 
-const { enqueueArticle }  = require('../shared/queueClient');
-const { isDuplicate }     = require('../shared/tableClient');
-const { logAuditEvent }   = require('../shared/tableClient');
-const createLogger        = require('../shared/logger');
+const { enqueueArticle }             = require('../shared/queueClient');
+const { isDuplicate, markIngested,
+        logAuditEvent }              = require('../shared/tableClient');
+const { CONTAINERS }                 = require('../shared/config');
+const createLogger                   = require('../shared/logger');
 
 const log = createLogger('fn-nlp-trigger');
 
-const BRONZE_CONTAINER = process.env.BLOB_CONTAINER_BRONZE ?? 'articles-bronze';
+const BRONZE_CONTAINER = CONTAINERS.BRONZE;
 
 module.exports = async function (context, eventGridEvent) {
   const event = eventGridEvent;
@@ -92,6 +93,16 @@ module.exports = async function (context, eventGridEvent) {
   if (alreadyQueued) {
     log.info('Duplicate blob — skipping enqueue', { urlHash });
     return;
+  }
+
+  // Write dedup entry BEFORE enqueueing.
+  // If we crash after enqueue without this, Event Grid retries would re-enqueue.
+  // fn-enrich's silver-exists check is a second safety net, but this is cleaner.
+  try {
+    await markIngested(urlHash, { url: '', category, ingestedAt });
+  } catch (err) {
+    // Dedup write failed — proceed anyway; fn-enrich idempotency will cover it
+    log.warn('markIngested pre-enqueue failed (non-fatal)', { urlHash, error: err.message });
   }
 
   // Enqueue for enrichment

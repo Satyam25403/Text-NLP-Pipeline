@@ -20,6 +20,7 @@ dbutils.widgets.text("silver_root",    "abfss://articles-silver@<account>.dfs.co
 dbutils.widgets.text("gold_root",      "abfss://articles-gold@<account>.dfs.core.windows.net",   "Gold ADLS path")
 dbutils.widgets.text("lookback_days",  "7",  "Days to look back for trend windows")
 dbutils.widgets.text("keyword_window", "3",  "Rolling window in days for keyword trends")
+dbutils.widgets.text("categories",     "technology,business,science,health", "Comma-separated ingest categories — must match Logic App + fn-index-refresh")
 
 # COMMAND ----------
 
@@ -35,6 +36,8 @@ silver_root    = dbutils.widgets.get("silver_root").rstrip("/")
 gold_root      = dbutils.widgets.get("gold_root").rstrip("/")
 lookback_days  = int(dbutils.widgets.get("lookback_days") or "7")
 keyword_window = int(dbutils.widgets.get("keyword_window") or "3")
+categories_raw = dbutils.widgets.get("categories") or "technology,business,science,health"
+categories     = [c.strip() for c in categories_raw.split(",") if c.strip()]
 
 # Default to yesterday if no date supplied
 if not run_date_str:
@@ -66,7 +69,7 @@ print(f"Loading silver for dates: {date_range[0]} → {date_range[-1]}")
 
 # Read silver JSON files for all categories × all dates in window
 # Pattern: {silver_root}/{category}/{date}/*.json
-categories = ["technology", "business", "science", "health"]
+# categories driven by widget parameter above — not hardcoded here
 
 silver_dfs = []
 for cat in categories:

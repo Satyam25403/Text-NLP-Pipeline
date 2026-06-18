@@ -8,6 +8,8 @@
 
     "NEWSAPI_KEY": "<your-newsapi-key-from-newsapi.org>",
 
+    "INGEST_CATEGORIES": "technology,business,science,health",
+
     "AZURE_STORAGE_CONNECTION_STRING": "UseDevelopmentStorage=true",
     "BLOB_CONTAINER_BRONZE": "articles-bronze",
     "BLOB_CONTAINER_SILVER": "articles-silver",
