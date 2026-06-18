@@ -228,7 +228,7 @@ function _formatResult(result) {
     category:        result.category      ?? null,
     publishedAt:     result.published_at  ?? null,  // Search index stores as published_at
     sentimentLabel:  result.sentiment_label ?? null,
-    sentimentScore:  result.sentiment_score ?? null,
+    sentimentScore:  result.sentiment_score_positive ?? null,
     entities:        result.entities      ?? [],
     keyPhrases:      result.key_phrases   ?? [],
   };

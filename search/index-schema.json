@@ -1,7 +1,6 @@
 {
   "name": "articles",
   "fields": [
-
     {
       "name": "id",
       "type": "Edm.String",
@@ -11,9 +10,8 @@
       "retrievable": true,
       "sortable": false,
       "facetable": false,
-      "comment": "url_hash — the document key. mergeOrUpload uses this for idempotent upserts."
+      "comment": "url_hash \u2014 the document key. mergeOrUpload uses this for idempotent upserts."
     },
-
     {
       "name": "url",
       "type": "Edm.String",
@@ -23,9 +21,8 @@
       "retrievable": true,
       "sortable": false,
       "facetable": false,
-      "comment": "Original article URL. Stored for retrieval, not searched — full text lives in ADLS."
+      "comment": "Original article URL. Stored for retrieval, not searched \u2014 full text lives in ADLS."
     },
-
     {
       "name": "title",
       "type": "Edm.String",
@@ -38,7 +35,6 @@
       "analyzer": "en.microsoft",
       "comment": "Article title. en.microsoft handles stemming, stop words, contractions better than standard Lucene."
     },
-
     {
       "name": "body_snippet",
       "type": "Edm.String",
@@ -49,9 +45,8 @@
       "sortable": false,
       "facetable": false,
       "analyzer": "en.microsoft",
-      "comment": "First 500 chars of article content. Full body stays in ADLS — Search is not a blob store."
+      "comment": "First 500 chars of article content. Full body stays in ADLS \u2014 Search is not a blob store."
     },
-
     {
       "name": "source",
       "type": "Edm.String",
@@ -63,7 +58,6 @@
       "facetable": true,
       "comment": "News source name (e.g. BBC, Reuters). Facetable for source-based drill-down."
     },
-
     {
       "name": "category",
       "type": "Edm.String",
@@ -75,7 +69,6 @@
       "facetable": true,
       "comment": "NewsAPI category: technology | business | science | health. Primary filter + facet."
     },
-
     {
       "name": "published_at",
       "type": "Edm.DateTimeOffset",
@@ -87,7 +80,6 @@
       "facetable": false,
       "comment": "Article publish timestamp. Sortable for recency ranking. Filterable for date range queries."
     },
-
     {
       "name": "sentiment_label",
       "type": "Edm.String",
@@ -99,9 +91,8 @@
       "facetable": true,
       "comment": "positive | negative | neutral | mixed. Facetable for sentiment-based filtering."
     },
-
     {
-      "name": "sentiment_score",
+      "name": "sentiment_score_positive",
       "type": "Edm.Double",
       "key": false,
       "searchable": false,
@@ -109,9 +100,8 @@
       "retrievable": true,
       "sortable": true,
       "facetable": false,
-      "comment": "Confidence score for the positive sentiment label (0.0–1.0). Sortable for sentiment ranking."
+      "comment": "Positive sentiment confidence score (0.0-1.0). Specifically scores.positive from Language API \u2014 NOT a general sentiment polarity score. Rename to sentiment_score_negative if you need to sort by negativity."
     },
-
     {
       "name": "entities",
       "type": "Collection(Edm.String)",
@@ -124,7 +114,6 @@
       "analyzer": "en.microsoft",
       "comment": "Flattened entity text strings (e.g. ['Apple', 'Tim Cook', 'Cupertino']). Searchable + filterable for entity-targeted queries."
     },
-
     {
       "name": "key_phrases",
       "type": "Collection(Edm.String)",
@@ -135,9 +124,8 @@
       "sortable": false,
       "facetable": false,
       "analyzer": "en.microsoft",
-      "comment": "Key phrases extracted by Language API. Searchable — boosts keyword recall for domain terms."
+      "comment": "Key phrases extracted by Language API. Searchable \u2014 boosts keyword recall for domain terms."
     },
-
     {
       "name": "content_vector",
       "type": "Collection(Edm.Single)",
@@ -149,11 +137,9 @@
       "facetable": false,
       "dimensions": 1536,
       "vectorSearchProfile": "hnsw-cosine-profile",
-      "comment": "text-embedding-ada-002 vector (1536 dims). retrievable=false — vectors are large, we never return them to clients. HNSW cosine similarity."
+      "comment": "text-embedding-ada-002 vector (1536 dims). retrievable=false \u2014 vectors are large, we never return them to clients. HNSW cosine similarity."
     }
-
   ],
-
   "vectorSearch": {
     "algorithms": [
       {
@@ -175,34 +161,51 @@
       }
     ]
   },
-
   "semantic": {
     "configurations": [
       {
         "name": "semantic-config",
         "prioritizedFields": {
-          "titleField":    { "fieldName": "title" },
-          "contentFields": [ { "fieldName": "body_snippet" } ],
+          "titleField": {
+            "fieldName": "title"
+          },
+          "contentFields": [
+            {
+              "fieldName": "body_snippet"
+            }
+          ],
           "keywordsFields": [
-            { "fieldName": "key_phrases" },
-            { "fieldName": "entities" }
+            {
+              "fieldName": "key_phrases"
+            },
+            {
+              "fieldName": "entities"
+            }
           ]
         },
         "comment": "Semantic ranker re-scores top-50 BM25+vector results using a cross-encoder language model. title weighted highest, then body_snippet, then key_phrases and entities as keyword context."
       }
     ]
   },
-
   "scoringProfiles": [
     {
       "name": "recency-boost",
-      "text": { "weights": { "title": 3, "body_snippet": 1, "key_phrases": 2, "entities": 2 } },
+      "text": {
+        "weights": {
+          "title": 3,
+          "body_snippet": 1,
+          "key_phrases": 2,
+          "entities": 2
+        }
+      },
       "functions": [
         {
           "type": "freshness",
           "fieldName": "published_at",
           "boost": 2,
-          "freshness": { "boostingDuration": "P7D" },
+          "freshness": {
+            "boostingDuration": "P7D"
+          },
           "interpolation": "logarithmic",
           "comment": "Articles published in the last 7 days get up to 2x boost, decaying logarithmically."
         }
@@ -210,11 +213,11 @@
       "functionAggregation": "sum"
     }
   ],
-
-  "defaultScoringProfile": "recency-boost",
-
   "corsOptions": {
-    "allowedOrigins": ["*"],
-    "maxAgeInSeconds": 300
+    "allowedOrigins": [
+      "https://<your-apim-name>.azure-api.net"
+    ],
+    "maxAgeInSeconds": 300,
+    "comment": "Restrict to your APIM gateway domain. Wildcard allows direct browser access with query key \u2014 tighten before production."
   }
 }

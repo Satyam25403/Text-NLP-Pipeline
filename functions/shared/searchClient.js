@@ -138,7 +138,7 @@ async function search({ q, top = 10, category, source, sentiment, semantic = fal
     filter,
     select: [
       'id', 'url', 'title', 'body_snippet', 'source', 'category',
-      'published_at', 'sentiment_label', 'sentiment_score',
+      'published_at', 'sentiment_label', 'sentiment_score_positive',
       'entities', 'key_phrases',
     ],
     facets: ['category,count:10', 'sentiment_label,count:5'],
@@ -164,6 +164,13 @@ async function search({ q, top = 10, category, source, sentiment, semantic = fal
       configurationName: 'semantic-config',
     };
     searchOptions.queryLanguage = 'en-us';
+    // Do NOT apply scoringProfile when semantic=true.
+    // The semantic cross-encoder re-scores the top-50 BM25+vector candidates.
+    // If a freshness boost fires before that window is built, fresh-but-irrelevant
+    // articles crowd out semantically-matched older ones before the ranker sees them.
+  } else {
+    // Apply recency boost only for non-semantic (keyword/vector) queries
+    searchOptions.scoringProfile = 'recency-boost';
   }
 
   const response = await client.search(q, searchOptions);

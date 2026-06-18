@@ -169,7 +169,7 @@ function _mapToSearchDoc(doc) {
     category:        doc.category        ?? null,
     published_at:    doc.publishedAt     ?? doc.published_at ?? null,
     sentiment_label: doc.sentiment?.label ?? null,
-    sentiment_score: doc.sentiment?.scores?.positive ?? null,
+    sentiment_score_positive: doc.sentiment?.scores?.positive ?? null,
     entities:        (doc.entities ?? []).map(e => e.text),   // Search stores string[]
     key_phrases:     doc.keyPhrases      ?? [],
     content_vector:  doc.content_vector  ?? null,             // null → field not set in index
