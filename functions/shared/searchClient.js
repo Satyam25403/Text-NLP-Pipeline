@@ -122,14 +122,15 @@ async function upsertDocuments(documents) {
  *
  * @returns {{ count, results: SearchResult[] }}
  */
-async function search({ q, top = 10, category, source, sentiment, semantic = false, vector }) {
+async function search({ q, top = 10, category, source, sentiment, semantic = false, vector, dateFilter }) {
   const client = getSearchClient();
 
   // Build OData filter
   const filterParts = [];
-  if (category)  filterParts.push(`category eq '${category.replace(/'/g, "''")}'`);
-  if (source)    filterParts.push(`source eq '${source.replace(/'/g, "''")}'`);
-  if (sentiment) filterParts.push(`sentiment_label eq '${sentiment.replace(/'/g, "''")}'`);
+  if (category)    filterParts.push(`category eq '${category.replace(/'/g, "''")}'`);
+  if (source)      filterParts.push(`source eq '${source.replace(/'/g, "''")}'`);
+  if (sentiment)   filterParts.push(`sentiment_label eq '${sentiment.replace(/'/g, "''")}'`);
+  if (dateFilter)  filterParts.push(dateFilter);
   const filter = filterParts.length > 0 ? filterParts.join(' and ') : undefined;
 
   const searchOptions = {
@@ -140,6 +141,7 @@ async function search({ q, top = 10, category, source, sentiment, semantic = fal
       'published_at', 'sentiment_label', 'sentiment_score',
       'entities', 'key_phrases',
     ],
+    facets: ['category,count:10', 'sentiment_label,count:5'],
     includeTotalCount: true,
   };
 
@@ -174,9 +176,19 @@ async function search({ q, top = 10, category, source, sentiment, semantic = fal
     });
   }
 
+  // Collect facets from response
+  const facets = {};
+  if (response.facets) {
+    const categoryFacets  = response.facets['category'];
+    const sentimentFacets = response.facets['sentiment_label'];
+    if (categoryFacets)  facets.categories  = categoryFacets.map(f => ({ value: f.value, count: f.count }));
+    if (sentimentFacets) facets.sentiments  = sentimentFacets.map(f => ({ value: f.value, count: f.count }));
+  }
+
   return {
     count:   response.count ?? results.length,
     results,
+    facets:  Object.keys(facets).length > 0 ? facets : null,
   };
 }
 

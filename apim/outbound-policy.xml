@@ -1,0 +1,91 @@
+<!--
+  outbound-policy.xml
+  Applied to: GET /search operation on the nlp-search API
+
+  Caches successful search responses for 60 seconds.
+
+  Cache key is the full query string — identical queries from any caller
+  return the cached response. This is safe because:
+    - Search results for a given query change only when the nightly ADF
+      pipeline refreshes the index (once per day).
+    - 60s TTL is short enough that near-real-time feel is preserved.
+    - Errors are cached for 5s only to prevent hammering a degraded Search.
+
+  ADR note: APIM caching + near-real-time indexing tension documented in
+  PROJECT_PLAN.md section 12.
+-->
+<policies>
+  <inbound>
+    <base />
+
+    <!--
+      Cache lookup before the request reaches the Function.
+      vary-by-query-parameter: cache is keyed per unique combination of all params.
+      If cached response exists → return immediately, Function is never called.
+    -->
+    <cache-lookup
+      vary-by-developer="false"
+      vary-by-developer-groups="false"
+      allow-private-response-caching="false"
+      must-revalidate="false"
+      downstream-caching-type="none">
+      <vary-by-query-parameter>q</vary-by-query-parameter>
+      <vary-by-query-parameter>top</vary-by-query-parameter>
+      <vary-by-query-parameter>category</vary-by-query-parameter>
+      <vary-by-query-parameter>source</vary-by-query-parameter>
+      <vary-by-query-parameter>sentiment</vary-by-query-parameter>
+      <vary-by-query-parameter>semantic</vary-by-query-parameter>
+      <vary-by-query-parameter>vector</vary-by-query-parameter>
+      <vary-by-query-parameter>from</vary-by-query-parameter>
+      <vary-by-query-parameter>to</vary-by-query-parameter>
+    </cache-lookup>
+
+  </inbound>
+
+  <backend>
+    <base />
+  </backend>
+
+  <outbound>
+    <base />
+
+    <!--
+      Cache successful responses for 60s.
+      Error responses (4xx/5xx) cached for 5s only — prevents hammering
+      a degraded backend while still providing brief protection.
+    -->
+    <choose>
+      <when condition="@(context.Response.StatusCode == 200)">
+        <cache-store duration="60" />
+      </when>
+      <when condition="@(context.Response.StatusCode == 400)">
+        <!-- Bad request — cache for 5s: same bad query will keep failing -->
+        <cache-store duration="5" />
+      </when>
+      <otherwise>
+        <!-- 5xx errors: cache for 5s to prevent hammering degraded backend -->
+        <cache-store duration="5" />
+      </otherwise>
+    </choose>
+
+    <!--
+      Add cache status header so clients can tell if they got a cached response.
+      X-Cache: HIT | MISS
+    -->
+    <set-header name="X-Cache" exists-action="override">
+      <value>@(context.Variables.ContainsKey("isCacheHit") && (bool)context.Variables["isCacheHit"] ? "HIT" : "MISS")</value>
+    </set-header>
+
+    <!--
+      Add CORS headers — allows the search API to be called from browser clients.
+    -->
+    <set-header name="Access-Control-Allow-Origin" exists-action="override">
+      <value>*</value>
+    </set-header>
+
+  </outbound>
+
+  <on-error>
+    <base />
+  </on-error>
+</policies>

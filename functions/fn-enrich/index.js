@@ -172,8 +172,12 @@ module.exports = async function (context, queueMessage) {
  */
 function _extractText(article) {
   if (article.content && article.content.trim().length > 0) {
-    // Strip the "[+N chars]" truncation marker NewsAPI adds
-    return article.content.replace(/\s*\[[\+\d]+ chars\]\s*$/, '').trim();
+    // Strip the "[+N chars]" truncation marker NewsAPI adds on free tier
+    const stripped = article.content.replace(/\s*\[[\+\d]+ chars\]\s*$/, '');
+    // Strip HTML fragments (some publishers return partial HTML in content)
+    // Replace tags with a space to avoid words running together after stripping
+    const noHtml = stripped.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+    return noHtml;
   }
   if (article.description && article.description.trim().length > 0) {
     return article.description.trim();

@@ -1,0 +1,94 @@
+<!--
+  inbound-policy.xml
+  Applied to: all operations on the nlp-search API in APIM
+
+  Order of execution (top to bottom):
+    1. Rate limit   — reject before any work if over quota
+    2. JWT validate — reject unauthenticated requests
+    3. Set headers  — forward caller identity to the Function
+
+  ADR-008: APIM is the auth boundary. The Azure Function itself is
+  authLevel:anonymous — it trusts APIM has already validated.
+-->
+<policies>
+  <inbound>
+    <base />
+
+    <!--
+      Rate limiting: 100 calls per 60 seconds per subscription key.
+      Subscription key is passed as Ocp-Apim-Subscription-Key header or
+      subscription-key query param. Keyed per-subscription so one abusive
+      client can't starve others.
+
+      remaining-calls-header-name: exposes X-RateLimit-Remaining to clients
+      so they can back off gracefully before hitting 429.
+    -->
+    <rate-limit-by-key
+      calls="100"
+      renewal-period="60"
+      counter-key="@(context.Subscription.Id)"
+      increment-condition="@(context.Response.StatusCode != 429)"
+      remaining-calls-header-name="X-RateLimit-Remaining"
+      retry-after-header-name="Retry-After" />
+
+    <!--
+      JWT validation: OAuth 2.0 client credentials flow.
+      Tokens issued by Azure AD (Entra ID) tenant.
+
+      Replace <YOUR_TENANT_ID> and <YOUR_API_APP_ID_URI> with your values.
+
+      Claims validated:
+        - aud: must match the API's Application ID URI
+        - iss: must be from our tenant
+        - exp: token expiry (automatic)
+
+      On failure: returns 401 Unauthorized before the request reaches the Function.
+    -->
+    <validate-jwt
+      header-name="Authorization"
+      failed-validation-httpcode="401"
+      failed-validation-error-message="Unauthorized: valid Bearer token required"
+      require-expiration-time="true"
+      require-scheme="Bearer"
+      require-signed-tokens="true">
+      <openid-config url="https://login.microsoftonline.com/<YOUR_TENANT_ID>/v2.0/.well-known/openid-configuration" />
+      <audiences>
+        <audience>api://<YOUR_API_APP_ID_URI></audience>
+      </audiences>
+      <issuers>
+        <issuer>https://sts.windows.net/<YOUR_TENANT_ID>/</issuer>
+        <issuer>https://login.microsoftonline.com/<YOUR_TENANT_ID>/v2.0</issuer>
+      </issuers>
+    </validate-jwt>
+
+    <!--
+      Forward the validated caller's object ID to the Function as a header.
+      Useful for per-user audit logging if needed downstream.
+    -->
+    <set-header name="X-Caller-Object-Id" exists-action="override">
+      <value>@(context.Request.Headers.GetValueOrDefault("Authorization","")
+        .Split(' ').LastOrDefault()
+        .AsJwt()?.Claims.GetValueOrDefault("oid", "unknown"))</value>
+    </set-header>
+
+    <!--
+      Strip the Authorization header before forwarding to the Function.
+      The Function doesn't need it — APIM has already validated.
+      This also prevents the raw JWT from appearing in Function logs.
+    -->
+    <set-header name="Authorization" exists-action="delete" />
+
+  </inbound>
+
+  <backend>
+    <base />
+  </backend>
+
+  <outbound>
+    <base />
+  </outbound>
+
+  <on-error>
+    <base />
+  </on-error>
+</policies>
