@@ -27,7 +27,7 @@
  *   query:    { q, top, filters, semantic, vector },
  *   count:    number,
  *   results:  [{ score, id, url, title, source, category, publishedAt,
- *                sentiment_label, sentiment_score, entities, key_phrases }],
+ *                sentiment_label, sentiment_score_positive, entities, key_phrases }],
  *   facets:   { categories: [{value, count}], sentiments: [{value, count}] },
  *   durationMs: number
  * }
@@ -43,10 +43,11 @@
  *   If embedding fails, we fall back to keyword-only search and note it in the response.
  */
 
-const { search }                 = require('../shared/searchClient');
+const { search }                       = require('../shared/searchClient');
 const { embedText,
-        buildEmbeddingInput }    = require('../shared/openaiClient');
-const createLogger               = require('../shared/logger');
+        buildEmbeddingInput }          = require('../shared/openaiClient');
+const { INGEST_CATEGORIES }            = require('../shared/config');
+const createLogger                     = require('../shared/logger');
 
 const log = createLogger('fn-search-api');
 
@@ -174,7 +175,9 @@ function _parseParams(query = {}) {
   }
 
   // category — must be one of the valid NewsAPI categories
-  const VALID_CATEGORIES = new Set(['technology', 'business', 'science', 'health']);
+  // Driven from shared/config.js — same source as fn-index-refresh and Databricks.
+  // Adding a category to INGEST_CATEGORIES automatically makes it valid here.
+  const VALID_CATEGORIES = new Set(INGEST_CATEGORIES);
   const category = query.category?.trim().toLowerCase() ?? null;
   if (category && !VALID_CATEGORIES.has(category)) {
     return { error: `"category" must be one of: ${[...VALID_CATEGORIES].join(', ')}` };

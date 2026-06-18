@@ -1,424 +1,445 @@
-# Text NLP Pipeline — Project Plan
-## Pre-Implementation Blueprint
+# Text NLP Pipeline
+
+Ingests news articles from NewsAPI, enriches them with sentiment analysis, named entity recognition, and vector embeddings, indexes them for hybrid semantic search in Azure AI Search, and serves a search API to consumers.
 
 ---
 
-## 1. Project Overview
-
-**Goal**: Ingest news articles from NewsAPI, enrich with NLP (sentiment, NER, key phrases) and vector embeddings, index for hybrid semantic search in Azure AI Search, and serve trend analytics + a search API.
-
-**Stack**: Azure Logic Apps · Azure Functions (Node.js) · Azure Blob Storage · ADLS Gen2 · Azure Cognitive Services (Language API) · Azure OpenAI · Azure Databricks · Azure AI Search · Azure API Management · Microsoft Purview
-
-**Constraint**: NewsAPI free tier = 100 req/day, 100 articles/request → max 10,000 articles/day.
-
----
-
-## 2. Architecture Decision Record (ADR)
-
-### ADR-001: Logic App vs ADF HTTP for ingestion scheduler
-**Decision**: Logic App  
-**Reason**: Logic Apps natively support HTTP connectors, JSON parsing, schedule triggers (recurrence), and writing to Blob Storage — no custom code. ADF HTTP is heavier, requires linked services, and is better suited for bulk data movement, not API polling. Logic App also integrates directly with Event Grid.
-
-### ADR-002: Event Grid vs Event Hub for fan-out
-**Decision**: Event Grid  
-**Reason**: Event Grid is push-based, serverless, and designed for blob events (BlobCreated trigger). Event Hub is pull-based and better for high-throughput streaming (millions/sec). Our volume (~10K articles/day) is far below Event Hub thresholds. Event Grid's BlobCreated subscription is zero-config with Blob Storage.
-
-### ADR-003: Idempotent ingestion key
-**Decision**: URL hash as dedup key  
-**Reason**: Article URLs are stable unique identifiers. SHA-256(url) → stored in Azure Table Storage. Before writing to Blob, check if hash exists. If yes, skip. This prevents re-processing on Logic App re-runs.
-
-### ADR-004: NLP enrichment runtime
-**Decision**: Azure Function (Node.js) over a container/VM  
-**Reason**: Event Grid → Function is a natural serverless chain. Batch size limits of Language API (10 documents/request) handled in the Function with chunking logic. Functions scale per event automatically.
-
-### ADR-005: Embeddings model
-**Decision**: Azure OpenAI `text-embedding-ada-002`  
-**Reason**: 1536-dimensional vectors, well-supported in Azure AI Search HNSW index, cosine similarity. Per-article call (not batch) since Language API and OpenAI calls are already concurrent per article batch.
-
-### ADR-006: Gold layer compute
-**Decision**: Databricks (PySpark notebook)  
-**Reason**: Databricks Delta Lake supports MERGE (upsert) semantics natively. Rolling window aggregations (top entities per week, keyword trends) are Spark-native operations. MLflow is built into Databricks for model/embedding version tracking.
-
-### ADR-007: Hybrid search strategy
-**Decision**: BM25 (keyword) + HNSW (vector) with Reciprocal Rank Fusion (RRF)  
-**Reason**: Pure vector search misses exact-match queries (e.g. "Apple Inc Q3 earnings"). Pure keyword misses semantic similarity. RRF combines ranked lists without needing score normalization. Semantic ranker re-scores top-50 results using a cross-encoder — optional but improves precision.
-
-### ADR-008: API auth strategy
-**Decision**: APIM with OAuth 2.0 (client credentials) + JWT validation inbound policy  
-**Reason**: Azure Function itself has no auth — APIM sits in front as the security boundary. JWT validation policy offloads auth from Function code. Rate limiting per subscription key prevents abuse of free Search tier.
-
-### ADR-009: Content storage — ADLS not Search
-**Decision**: Store full article text in ADLS Gen2, store only metadata + vectors in AI Search  
-**Reason**: AI Search storage is expensive and not designed for blob storage. Search index holds: id, url, title, source, category, published_at, sentiment_score, sentiment_label, entities (array), key_phrases (array), content_vector (1536-dim). Full article body stays in ADLS and is fetched on demand via URL reference.
-
----
-
-## 3. Data Flow (End to End)
+## Architecture Overview
 
 ```
-NewsAPI (per category, scheduled)
-  └─ Logic App (recurrence every 6h, 4 categories × 25 articles = 100/day)
-       └─ Blob Storage: raw/{category}/{date}/{url_hash}.json   [bronze]
-            └─ Event Grid (BlobCreated)
-                 ├─ Fn-NLP-Trigger   → kicks enrichment job (adds to queue)
-                 └─ Fn-Audit-Logger  → writes to Table Storage audit log
-
-Fn-NLP-Trigger enqueues article refs to Azure Storage Queue
-  └─ Fn-Enrich (queue trigger, batch=10)
-       ├─ Calls Language API: sentiment + NER + key phrases (batch of 10)
-       ├─ Calls Azure OpenAI: text-embedding-ada-002 per article
-       ├─ Merges results
-       └─ Writes to ADLS Gen2: silver/{category}/{date}/{url_hash}.json  [silver]
-
-ADF Pipeline (nightly, 02:00 UTC)
-  └─ Activity 1: Check silver layer completeness
-  └─ Activity 2: Trigger Databricks notebook (gold aggregation)
-       └─ Databricks: reads silver → computes gold outputs
-            ├─ sentiment_trends_by_category (daily rolling 7d)
-            ├─ top_entities_per_week
-            └─ trending_keywords (rolling 3d window)
-       └─ Writes to ADLS: gold/{report_type}/{date}/
-  └─ Activity 3: Trigger Fn-Index-Refresh → pushes silver docs to AI Search
-
-Azure AI Search Index
-  └─ Fn-Index-Refresh: upsert documents (key=url_hash)
-       ├─ Keyword fields: title, body_snippet, category, source, entities
-       └─ Vector field: content_vector (1536-dim, HNSW, cosine)
-
-Fn-Search-API (HTTP trigger)
-  └─ Receives query → calls AI Search with hybrid query (RRF)
-  └─ Returns ranked results + metadata
-
-APIM (in front of Fn-Search-API)
-  └─ Inbound: JWT validation, rate limit (100 req/min/subscription)
-  └─ Outbound: response caching (60s TTL for identical queries)
-
-Microsoft Purview
-  └─ Scans: Blob Storage, ADLS Gen2, Azure SQL (audit table), AI Search index
-  └─ Builds lineage: raw JSON → silver → gold → Search index
-  └─ Custom classification rule: flag articles with PII entities (PERSON + email/phone patterns)
+NewsAPI (top-headlines, every 6h)
+    │
+    ▼
+Logic App ──► fn-hash-url (SHA-256 URL dedup key)
+    │
+    ▼
+Blob Storage: articles-bronze/{category}/{date}/{urlHash}.json
+    │
+    ▼ BlobCreated (Event Grid)
+    ├──► fn-nlp-trigger  → Storage Queue (article-enrich-queue)
+    └──► fn-audit-logger → Table Storage (articleAudit)
+              │
+              ▼
+         fn-enrich (Queue trigger)
+              ├── Azure Cognitive Services Language API
+              │   └── sentiment + NER + key phrases
+              ├── Azure OpenAI (text-embedding-ada-002)
+              │   └── 1536-dim content vector
+              └── ADLS Gen2: articles-silver/{category}/{date}/{urlHash}.json
+                       │
+                       ▼ ADF nightly pipeline (02:00 UTC)
+                       ├── Databricks notebook → gold aggregations
+                       │   ├── sentiment_trends (7-day rolling)
+                       │   ├── top_entities (per week)
+                       │   └── trending_keywords (3-day rolling)
+                       └── fn-index-refresh → Azure AI Search
+                                                    │
+                                                    ▼
+                                              APIM (JWT + rate limit + cache)
+                                                    │
+                                                    ▼
+                                              fn-search-api
+                                              (hybrid BM25 + HNSW + optional semantic reranker)
 ```
+
+**Six layers:**
+
+| Layer | What it does |
+|---|---|
+| 1 — Ingestion | Logic App polls NewsAPI every 6h, writes individual article blobs to bronze |
+| 2 — NLP Enrichment | Azure Function reads bronze, calls Language API + OpenAI in parallel, writes silver |
+| 3 — Batch Orchestration | ADF nightly pipeline: silver completeness check → Databricks gold → Search index refresh |
+| 4 — Indexing | Azure AI Search hybrid index: BM25 keyword + HNSW vector, semantic reranker optional |
+| 5 — API Serving | fn-search-api behind APIM: JWT auth, rate limiting, 60s response caching |
+| 6 — Governance | Microsoft Purview: lineage graph, PII flagging via custom classification |
 
 ---
 
-## 4. Project Structure
+## Architecture Decision Record
+
+### ADR-001: Logic App over ADF HTTP for ingestion
+Logic Apps natively support HTTP connectors, schedule triggers, and blob writes. ADF is designed for bulk data movement, not API polling. Logic Apps also integrate directly with Event Grid.
+
+### ADR-002: Event Grid over Event Hub for fan-out
+Event Grid is push-based and designed for blob events (`BlobCreated`). Event Hub is pull-based and optimised for high-throughput streaming. Our volume (~1,600 articles/day) is far below Event Hub thresholds.
+
+### ADR-003: URL hash as dedup key
+`SHA-256(url)[0:16]` is the stable dedup key. Logic Apps have no native SHA-256 — `fn-hash-url` fills this gap. The hash becomes the blob filename, Table Storage dedup key, and Search document `id`. Collision probability at our volume: negligible.
+
+### ADR-004: Queue trigger for enrichment (not direct Event Grid)
+Event Grid → `fn-nlp-trigger` decouples arrival from processing. The queue absorbs bursts, enables per-article retry, and separates routing logic from enrichment logic. `maxDequeueCount: 5` before poison queue.
+
+### ADR-005: Language API + OpenAI in parallel
+`Promise.all()` in `fn-enrich` — the two calls are independent. Parallel execution halves enrichment latency at no cost.
+
+### ADR-006: Databricks for gold aggregation
+Delta Lake `MERGE` semantics make nightly aggregation idempotent. Rolling window aggregations (7-day sentiment, 3-day keywords) are native Spark operations. MLflow is built-in for embedding version tracking.
+
+### ADR-007: Hybrid BM25 + HNSW with RRF
+Pure vector search misses exact-match queries (e.g. "Apple Inc Q3"). Pure keyword misses semantic similarity. Reciprocal Rank Fusion merges both ranked lists without score normalisation. Over-fetch `kNN = max(top×2, 50)` gives RRF enough candidates.
+
+### ADR-008: `defaultScoringProfile` removed from Search schema
+The semantic cross-encoder re-scores the top-50 BM25+vector candidates. If a freshness boost fires globally before this window is built, fresh-but-irrelevant articles crowd out semantically-matched older ones. `scoringProfile: 'recency-boost'` is now passed explicitly in `searchClient.js` only when `semantic === false`.
+
+### ADR-009: APIM as auth boundary
+Azure Functions are `authLevel: anonymous` — APIM handles JWT validation (OAuth 2.0 client credentials), rate limiting (100 req/min/subscription), and response caching (60s TTL). The JWT is stripped before forwarding to the Function.
+
+### ADR-010: Content stored in ADLS, not Search
+AI Search storage is expensive and not designed for blob storage. The Search index holds metadata + vectors. Full article body stays in ADLS, referenced by URL.
+
+---
+
+## Project Structure
 
 ```
 nlp-pipeline/
-│
-├── README.md                          # How to run, architecture, decisions
-├── .env.example                       # All env vars with descriptions (no secrets)
-├── .gitignore
-├── package.json                       # Root (workspaces)
-│
-├── infra/                             # Azure infrastructure as code
-│   ├── main.bicep                     # Entry point — calls all modules
-│   ├── parameters.json                # Environment parameters
-│   ├── modules/                       # Bicep resource provisioning (one file per resource)
-│   │   ├── storage.bicep              # Blob Storage + ADLS Gen2 + Table Storage + Queue
-│   │   ├── functions.bicep            # All Function Apps (one app, multiple functions)
-│   │   ├── logic-app.bicep            # Logic App workflow definition
-│   │   ├── eventgrid.bicep            # Event Grid subscription
-│   │   ├── cognitive.bicep            # Language API + Azure OpenAI
-│   │   ├── databricks.bicep           # Databricks workspace
-│   │   ├── search.bicep               # Azure AI Search + index schema
-│   │   ├── apim.bicep                 # APIM instance + API + policies
-│   │   └── purview.bicep              # Purview account + scan rules
-│   └── adf/                           # ADF artifacts — deployed via az datafactory CLI, NOT Bicep
-│       ├── pipeline_nlp_nightly.json      # 5-activity nightly pipeline
-│       ├── dataset_silver_container.json  # SilverContainerDataset (used by GetMetadata activity)
-│       └── trigger_nightly_schedule.json  # Daily 02:00 UTC schedule trigger
-│
-├── functions/                         # Azure Functions App (Node.js)
+├── functions/                    # Azure Functions App (Node.js 18+)
+│   ├── host.json                 # Runtime config (timeout, queue batch size)
 │   ├── package.json
-│   ├── host.json
-│   ├── local.settings.json.example
-│   │
-│   ├── shared/                        # Shared utilities across functions
-│   │   ├── blobClient.js              # Azure Blob Storage SDK wrapper
-│   │   ├── tableClient.js             # Table Storage SDK wrapper (dedup + audit)
-│   │   ├── queueClient.js             # Storage Queue SDK wrapper
-│   │   ├── languageClient.js          # Cognitive Services Language API wrapper
-│   │   ├── openaiClient.js            # Azure OpenAI embedding wrapper
-│   │   ├── searchClient.js            # Azure AI Search SDK wrapper
-│   │   └── logger.js                  # Structured logger (Application Insights)
-│   │
-│   ├── fn-nlp-trigger/                # Event Grid trigger → enqueue article refs
-│   │   ├── function.json
-│   │   └── index.js
-│   │
-│   ├── fn-audit-logger/               # Event Grid trigger → write audit row
-│   │   ├── function.json
-│   │   └── index.js
-│   │
-│   ├── fn-enrich/                     # Queue trigger → NLP enrichment
-│   │   ├── function.json
-│   │   └── index.js
-│   │
-│   ├── fn-index-refresh/              # HTTP trigger (called by ADF) → push to Search
-│   │   ├── function.json
-│   │   └── index.js
-│   │
-│   └── fn-search-api/                 # HTTP trigger → search endpoint
-│       ├── function.json
-│       └── index.js
-│
-├── logic-app/                         # Logic App workflow definition
-│   └── workflow.json                  # ARM/Bicep-embeddable workflow definition
-│
-├── databricks/                        # Databricks notebooks
-│   ├── gold_aggregation.py            # Main gold layer notebook
-│   └── utils/
-│       └── delta_helpers.py           # MERGE/upsert helpers, rolling window UDFs
-│
-├── search/                            # AI Search index definitions
-│   ├── index-schema.json              # Full index schema (fields, vector config)
-│   ├── skillset.json                  # (optional) built-in skillset definition
-│   └── indexer.json                   # (optional) indexer if push model not used
-│
-├── apim/                              # APIM policy files
-│   ├── inbound-policy.xml             # JWT validation + rate limit
-│   └── outbound-policy.xml            # Response caching
-│
-├── purview/                           # Purview configuration
-│   ├── classification-rules.json      # PII custom classification rule
-│   └── scan-config.json               # Scan definitions for each asset type
-│
-├── scripts/                           # One-off admin / setup scripts
-│   ├── create-index.js                # Create/update AI Search index
-│   ├── create-search-alias.js         # Zero-downtime index swap
-│   ├── backfill-silver.js             # Re-enrich bronze articles if needed
-│   └── test-pipeline.js              # End-to-end smoke test
-│
-└── docs/
-    ├── architecture.md                # Detailed ADR + component descriptions
-    ├── local-dev.md                   # Local development guide
-    ├── deployment.md                  # Step-by-step Azure deployment
-    └── api-reference.md               # Search API endpoint docs
+│   ├── shared/                   # Shared SDK wrappers — imported by all functions
+│   │   ├── config.js             # Single source of truth: categories, containers, queues
+│   │   ├── logger.js             # Structured JSON logger (Application Insights)
+│   │   ├── blobClient.js         # Bronze/silver/error blob read/write
+│   │   ├── tableClient.js        # Dedup table + audit log
+│   │   ├── queueClient.js        # Enrichment queue enqueue/peek
+│   │   ├── languageClient.js     # Cognitive Services Language API (batch 10)
+│   │   ├── openaiClient.js       # Azure OpenAI ada-002 embeddings (retry 3×)
+│   │   └── searchClient.js       # AI Search upsert + hybrid query
+│   ├── fn-hash-url/              # HTTP: computes SHA-256(url)[0:16] for Logic App
+│   ├── fn-nlp-trigger/           # Event Grid: dedup check → enqueue article
+│   ├── fn-audit-logger/          # Event Grid: write immutable audit record
+│   ├── fn-enrich/                # Queue: NLP enrichment + embedding → silver
+│   ├── fn-index-refresh/         # HTTP (called by ADF): silver → Search upsert
+│   └── fn-search-api/            # HTTP GET: hybrid search endpoint (behind APIM)
+├── logic-app/
+│   ├── workflow.json             # Logic App: polls NewsAPI, writes bronze blobs
+│   └── README.md                 # Logic App deployment guide
+├── databricks/
+│   └── gold_aggregation.py       # PySpark notebook: silver → gold aggregations
+├── search/
+│   └── index-schema.json         # AI Search index: 12 fields, HNSW, semantic config
+├── infra/
+│   ├── modules/                  # Bicep resource provisioning (one file per resource)
+│   └── adf/                      # ADF pipeline + dataset + trigger JSON definitions
+│       ├── pipeline_nlp_nightly.json
+│       ├── dataset_silver_container.json
+│       └── trigger_nightly_schedule.json
+├── apim/
+│   ├── inbound-policy.xml        # JWT validation + rate limiting
+│   └── outbound-policy.xml       # Response caching + CORS
+├── purview/
+│   ├── classification-rules.json # PII custom classification
+│   └── scan-config.json
+└── scripts/
+    ├── create-index.js           # Idempotent AI Search index deploy
+    ├── create-search-alias.js    # Zero-downtime index swap via alias
+    ├── schemaUtils.js            # stripComments (used by create-index.js)
+    └── test-pipeline.js          # End-to-end smoke test (unit + integration modes)
 ```
 
 ---
 
-## 5. Environment Variables (`.env.example`)
+## Prerequisites
+
+- Node.js 18+
+- Azure CLI (`az`) authenticated to your subscription
+- Azure Functions Core Tools v4 (`npm install -g azure-functions-core-tools@4`)
+- Azurite (local Storage emulator): `npm install -g azurite`
+- Python 3.8+ (for Databricks notebook local testing only)
+- A NewsAPI key from [newsapi.org](https://newsapi.org) (free tier works)
+
+---
+
+## Environment Setup
 
 ```bash
-# NewsAPI
-NEWSAPI_KEY=
+cd functions
+cp local.settings.example.txt .env
+# Fill in all values — see comments in the file
+```
 
-# Azure Storage
-AZURE_STORAGE_CONNECTION_STRING=
-BLOB_CONTAINER_BRONZE=articles-bronze
-BLOB_CONTAINER_SILVER=articles-silver
-ADLS_CONTAINER_GOLD=articles-gold
-TABLE_DEDUP=articleDedup
-TABLE_AUDIT=articleAudit
-QUEUE_ENRICH=article-enrich-queue
+Required variables:
 
-# Cognitive Services
-LANGUAGE_ENDPOINT=https://<name>.cognitiveservices.azure.com/
-LANGUAGE_API_KEY=
-LANGUAGE_API_VERSION=2023-04-01
+| Variable | Description |
+|---|---|
+| `NEWSAPI_KEY` | Raw key from newsapi.org — no prefix, no whitespace |
+| `AZURE_STORAGE_CONNECTION_STRING` | `UseDevelopmentStorage=true` for local, real conn string for Azure |
+| `LANGUAGE_ENDPOINT` | Cognitive Services Language API endpoint |
+| `LANGUAGE_API_KEY` | Language API key |
+| `OPENAI_ENDPOINT` | Azure OpenAI endpoint |
+| `OPENAI_API_KEY` | Azure OpenAI key |
+| `OPENAI_EMBEDDING_DEPLOYMENT` | Deployment name (default: `text-embedding-ada-002`) |
+| `SEARCH_ENDPOINT` | Azure AI Search endpoint |
+| `SEARCH_API_KEY` | Search admin key (for index create/refresh) |
+| `SEARCH_INDEX_NAME` | Index name (default: `articles`) |
+| `INGEST_CATEGORIES` | Comma-separated categories (default: `technology,business,science,health`) |
 
-# Azure OpenAI
-OPENAI_ENDPOINT=https://<name>.openai.azure.com/
-OPENAI_API_KEY=
-OPENAI_EMBEDDING_DEPLOYMENT=text-embedding-ada-002
+---
 
-# Azure AI Search
-SEARCH_ENDPOINT=https://<name>.search.windows.net
-SEARCH_API_KEY=
-SEARCH_INDEX_NAME=articles
+## Local Development
 
-# APIM
-APIM_ENDPOINT=https://<name>.azure-api.net
-APIM_SUBSCRIPTION_KEY=
+### 1. Start Azurite (local Storage emulator)
 
-# Databricks
-DATABRICKS_HOST=https://<workspace>.azuredatabricks.net
-DATABRICKS_TOKEN=
-DATABRICKS_CLUSTER_ID=
+```bash
+azurite --location .azurite --debug .azurite/debug.log
+```
 
-# Application Insights
-APPINSIGHTS_INSTRUMENTATIONKEY=
+### 2. Create the Search index
+
+```bash
+# Requires SEARCH_ENDPOINT and SEARCH_API_KEY in functions/.env
+node scripts/create-index.js
+```
+
+### 3. Start all Azure Functions
+
+```bash
+cd functions
+func start
+```
+
+Functions loaded:
+- `fn-hash-url` → `POST http://localhost:7071/api/fn-hash-url`
+- `fn-nlp-trigger` → Event Grid trigger (test via HTTP POST to admin endpoint)
+- `fn-audit-logger` → Event Grid trigger
+- `fn-enrich` → Queue trigger (fires automatically when queue has messages)
+- `fn-index-refresh` → `POST http://localhost:7071/api/fn-index-refresh`
+- `fn-search-api` → `GET http://localhost:7071/api/fn-search-api?q=apple`
+
+### 4. Run the smoke test
+
+```bash
+# Unit mode — no Azure required
+node scripts/test-pipeline.js
+
+# Integration mode — requires all env vars set
+node scripts/test-pipeline.js --integration
+```
+
+### 5. Manually trigger the pipeline
+
+```bash
+# Simulate a Logic App blob write
+az storage blob upload \
+  --connection-string "UseDevelopmentStorage=true" \
+  --container-name articles-bronze \
+  --name "technology/$(date +%Y-%m-%d)/test123.json" \
+  --file scripts/fixtures/sample-article.json
+
+# Check queue depth
+az storage queue peek \
+  --connection-string "UseDevelopmentStorage=true" \
+  --name article-enrich-queue
+
+# Trigger index refresh manually
+curl -X POST http://localhost:7071/api/fn-index-refresh \
+  -H "Content-Type: application/json" \
+  -d "{\"date\": \"$(date +%Y-%m-%d)\", \"category\": \"technology\"}"
+
+# Search
+curl "http://localhost:7071/api/fn-search-api?q=apple+earnings&category=technology"
 ```
 
 ---
 
-## 6. AI Search Index Schema (key fields)
+## Search API Reference
+
+```
+GET /api/fn-search-api
+Authorization: Bearer <JWT>           (required in production via APIM)
+```
+
+### Query Parameters
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `q` | string | required | Search query (max 500 chars) |
+| `top` | integer | 10 | Results to return (max 50) |
+| `category` | string | — | Filter: `technology\|business\|science\|health` |
+| `source` | string | — | Filter: exact source name (e.g. `BBC`) |
+| `sentiment` | string | — | Filter: `positive\|negative\|neutral\|mixed` |
+| `semantic` | boolean | false | Enable semantic reranker (costs extra Search units) |
+| `vector` | boolean | true | Enable vector search (requires embedding call) |
+| `from` | string | — | ISO date lower bound: `YYYY-MM-DD` |
+| `to` | string | — | ISO date upper bound: `YYYY-MM-DD` |
+
+### Example Requests
+
+```bash
+# Basic keyword search
+curl "https://<apim>.azure-api.net/search?q=Apple+earnings" \
+  -H "Authorization: Bearer <token>"
+
+# Semantic search with category filter
+curl "https://<apim>.azure-api.net/search?q=electric+vehicles&category=technology&semantic=true"
+
+# Sentiment-filtered date range
+curl "https://<apim>.azure-api.net/search?q=inflation&sentiment=negative&from=2024-01-01&to=2024-01-31"
+
+# Keyword-only (no vector embedding, faster)
+curl "https://<apim>.azure-api.net/search?q=Apple&vector=false"
+```
+
+### Response Shape
 
 ```json
 {
-  "name": "articles",
-  "fields": [
-    { "name": "id",              "type": "Edm.String",              "key": true,       "filterable": true },
-    { "name": "url",             "type": "Edm.String",              "retrievable": true },
-    { "name": "title",           "type": "Edm.String",              "searchable": true, "analyzer": "en.microsoft" },
-    { "name": "body_snippet",    "type": "Edm.String",              "searchable": true, "analyzer": "en.microsoft" },
-    { "name": "source",          "type": "Edm.String",              "filterable": true, "facetable": true },
-    { "name": "category",        "type": "Edm.String",              "filterable": true, "facetable": true },
-    { "name": "published_at",    "type": "Edm.DateTimeOffset",      "sortable": true,  "filterable": true },
-    { "name": "sentiment_label", "type": "Edm.String",              "filterable": true, "facetable": true },
-    { "name": "sentiment_score", "type": "Edm.Double",              "sortable": true },
-    { "name": "entities",        "type": "Collection(Edm.String)",  "searchable": true, "filterable": true },
-    { "name": "key_phrases",     "type": "Collection(Edm.String)",  "searchable": true },
-    { "name": "content_vector",  "type": "Collection(Edm.Single)",  "dimensions": 1536, "vectorSearchProfile": "hnsw-cosine" }
-  ],
-  "vectorSearch": {
-    "algorithms": [{ "name": "hnsw-config", "kind": "hnsw", "parameters": { "m": 4, "metric": "cosine" } }],
-    "profiles":   [{ "name": "hnsw-cosine", "algorithm": "hnsw-config" }]
+  "query": {
+    "q": "Apple earnings",
+    "top": 10,
+    "filters": { "category": "technology", "source": null, "sentiment": null, "from": null, "to": null },
+    "semantic": false,
+    "vector": true
   },
-  "semanticSearch": {
-    "configurations": [{
-      "name": "semantic-config",
-      "prioritizedFields": {
-        "titleField":   { "fieldName": "title" },
-        "contentFields": [{ "fieldName": "body_snippet" }],
-        "keywordsFields": [{ "fieldName": "key_phrases" }]
-      }
-    }]
-  }
-}
-```
-
----
-
-## 7. Key Implementation Contracts
-
-### fn-enrich input message (from queue)
-```json
-{
-  "blobPath": "raw/technology/2024-01-15/abc123.json",
-  "urlHash":  "abc123",
-  "category": "technology",
-  "ingestedAt": "2024-01-15T02:00:00Z"
-}
-```
-
-### Silver layer article schema
-```json
-{
-  "id":             "abc123",
-  "url":            "https://...",
-  "title":          "...",
-  "body_snippet":   "first 500 chars of content",
-  "source":         "BBC",
-  "category":       "technology",
-  "published_at":   "2024-01-15T00:00:00Z",
-  "sentiment":      { "label": "positive", "score": 0.87 },
-  "entities":       [{ "text": "Apple", "category": "Organization" }],
-  "key_phrases":    ["quarterly earnings", "revenue growth"],
-  "content_vector": [0.012, -0.034, ...],
-  "enriched_at":    "2024-01-15T02:05:00Z"
-}
-```
-
-### Search API request/response
-```
-GET /api/search?q=Apple earnings&category=business&top=10&semantic=true
-Authorization: Bearer <JWT>
-
-Response:
-{
-  "count": 10,
+  "count": 42,
   "results": [
     {
-      "id": "abc123",
-      "title": "...",
-      "url":   "...",
       "score": 0.94,
-      "sentiment_label": "positive",
-      "entities": ["Apple", "Tim Cook"],
-      "key_phrases": ["quarterly earnings"],
-      "published_at": "2024-01-15T00:00:00Z"
+      "id": "e9bca57a5f8d50f4",
+      "url": "https://www.theverge.com/2024/01/15/apple-earnings",
+      "title": "Apple reports record quarterly earnings",
+      "source": "The Verge",
+      "category": "technology",
+      "publishedAt": "2024-01-15T17:09:12Z",
+      "sentimentLabel": "positive",
+      "sentimentScore": 0.9,
+      "entities": ["Apple", "Tim Cook", "Cupertino"],
+      "keyPhrases": ["record earnings", "quarterly results"]
     }
   ],
-  "trends": null
+  "facets": {
+    "categories": [{ "value": "technology", "count": 38 }],
+    "sentiments":  [{ "value": "positive", "count": 30 }]
+  },
+  "durationMs": 142,
+  "warning": null
 }
 ```
 
 ---
 
-## 8. Error Handling Strategy
+## Deployment Order
 
-| Layer | Failure Scenario | Strategy |
+Run these in order — each step depends on the previous:
+
+```bash
+# 1. Storage resources
+az deployment group create -g <rg> --template-file infra/modules/storage.bicep
+
+# 2. Cognitive services
+az deployment group create -g <rg> --template-file infra/modules/cognitive.bicep
+
+# 3. Function App
+az deployment group create -g <rg> --template-file infra/modules/functions.bicep
+func azure functionapp publish <fn-app-name>
+
+# 4. Event Grid subscription
+az deployment group create -g <rg> --template-file infra/modules/eventgrid.bicep
+
+# 5. Logic App
+az logic workflow create \
+  --resource-group <rg> \
+  --name nlp-pipeline-ingestor \
+  --definition @logic-app/workflow.json \
+  --parameters newsApiKey=<key> storageAccountName=<account> \
+               hashFunctionUrl=https://<fn-app>.azurewebsites.net/api/fn-hash-url \
+               hashFunctionKey=<fn-key>
+
+# 6. Create Search index (run once)
+node scripts/create-index.js
+
+# 7. Search + Databricks
+az deployment group create -g <rg> --template-file infra/modules/search.bicep
+az deployment group create -g <rg> --template-file infra/modules/databricks.bicep
+# Upload databricks/gold_aggregation.py to /Shared/nlp-pipeline/ in your workspace
+
+# 8. ADF pipeline (dataset → pipeline → trigger, in this order)
+az datafactory dataset create  --factory-name <adf> -g <rg> \
+  --dataset-name SilverContainerDataset \
+  --properties @infra/adf/dataset_silver_container.json
+
+az datafactory pipeline create --factory-name <adf> -g <rg> \
+  --pipeline-name nlp_pipeline_nightly \
+  --pipeline @infra/adf/pipeline_nlp_nightly.json
+
+az datafactory trigger create  --factory-name <adf> -g <rg> \
+  --trigger-name NightlyScheduleTrigger \
+  --properties @infra/adf/trigger_nightly_schedule.json
+
+az datafactory trigger start   --factory-name <adf> -g <rg> \
+  --trigger-name NightlyScheduleTrigger
+
+# 9. APIM
+az deployment group create -g <rg> --template-file infra/modules/apim.bicep
+# Apply policies via Azure portal or APIM REST API
+
+# 10. Purview
+az deployment group create -g <rg> --template-file infra/modules/purview.bicep
+
+# 11. Smoke test
+node scripts/test-pipeline.js --integration
+```
+
+---
+
+## Monitoring
+
+### Application Insights queries
+
+```kusto
+-- Function errors in last 24h
+exceptions
+| where timestamp > ago(24h)
+| summarize count() by outerMessage
+| order by count_ desc
+
+-- fn-enrich throughput
+traces
+| where message contains "Enrichment complete"
+| summarize count() by bin(timestamp, 1h)
+| render timechart
+
+-- Search API latency
+traces
+| where message contains "Search complete"
+| extend durationMs = toint(customDimensions.durationMs)
+| summarize avg(durationMs), percentile(durationMs, 95) by bin(timestamp, 1h)
+```
+
+### ADF pipeline monitoring
+Azure portal → Data Factory → Monitor → Pipeline runs. Alert on `RunFailed` or `fn-index-refresh` returning HTTP 207 (partial failure).
+
+### Key metrics to watch
+
+| Metric | Source | Alert threshold |
 |---|---|---|
-| Ingestion | NewsAPI rate limit hit | Logic App retry policy (3x, exponential backoff). Dead-letter queue for failed batches. |
-| Ingestion | Duplicate article | URL hash check in Table Storage before blob write. Skip if exists. |
-| Enrichment | Language API partial failure | Per-article try/catch. Failed articles written to `error/` container with error metadata. Retry queue. |
-| Enrichment | OpenAI timeout | Azure OpenAI has built-in retry. Function timeout = 10min. Partial results (no vector) written to silver with `vectorStatus: "pending"`. |
-| Indexing | Search upsert failure | Batch upserts (1000 docs max). Failed batch retried once. Logged to Application Insights. |
-| ADF pipeline | Databricks notebook fails | ADF pipeline has on-failure alerts. Email notification via Logic App. Previous gold data remains. |
-| API | Search query error | Function returns 400 with structured error. APIM caches errors for 5s to prevent hammering. |
+| `article-enrich-queue` depth | Storage Queue | > 500 (enrichment falling behind) |
+| `fn-enrich` failures | App Insights | > 5% error rate |
+| Search index document count | AI Search metrics | No growth after nightly run |
+| NewsAPI 429 rate | Logic App run history | Any 429 not resolved by retry |
 
 ---
 
-## 9. Local Development Plan
+## Known Limitations
 
-### Running without Azure
-- **Azurite** (local Azure Storage emulator) for Blob, Table, Queue
-- **Azure Functions Core Tools v4** for local function execution
-- **NewsAPI**: real key required (free tier works)
-- **Language API + OpenAI**: either real Azure endpoint or mock stubs in `shared/mocks/`
-- **AI Search**: no local emulator → use a real free-tier Search instance (F1 is free)
-- Databricks notebooks: run locally as plain Python with `pyspark` installed
-
-### Local run order
-1. `azurite` (Storage emulator)
-2. `func start` in `functions/` (all functions loaded)
-3. Trigger ingestion manually via `scripts/test-pipeline.js`
-4. Watch queue → enrich → silver flow in logs
+- **NewsAPI free tier**: 100 req/day, articles truncated at ~200 chars. Content vector quality is limited by this truncation — embeddings built from title + snippet, not full article.
+- **AI Search free tier (F1)**: 50MB storage, no SLA. Upgrade to Basic for production.
+- **Logic App `SetVariable` concurrency**: Article loop runs sequentially (`repetitions: 1`) because `SetVariable` is not thread-safe. This means each category takes `n_articles × fn-hash-url_latency` time. At 100 articles × ~50ms each = ~5 seconds per category — well within the 6-hour polling window.
+- **APIM caching vs near-real-time indexing**: Search results cached for 60s. Articles indexed by the nightly ADF run won't appear in search results until the cache expires.
+- **Semantic reranker and scoring profile**: `scoringProfile: 'recency-boost'` is deliberately not applied when `semantic=true` — see ADR-008. For semantic queries, result ordering is controlled entirely by the cross-encoder.
 
 ---
 
-## 10. Deployment Order
+## Running Tests
 
-1. Deploy `infra/modules/storage.bicep` (Blob, ADLS, Table, Queue)
-2. Deploy `infra/modules/cognitive.bicep` (Language API + OpenAI)
-3. Deploy `infra/modules/functions.bicep` (Function App + App Settings)
-4. Deploy `infra/modules/eventgrid.bicep` (link Blob → Event Grid → Functions)
-5. Deploy `infra/modules/logic-app.bicep` (Logic App with NewsAPI connection)
-6. Run `scripts/create-index.js` (create AI Search index)
-7. Deploy `infra/modules/search.bicep`
-8. Deploy `infra/modules/databricks.bicep` + upload `databricks/gold_aggregation.py` notebook
-9. Deploy ADF artifacts in order (dataset before pipeline before trigger):
-   ```bash
-   az datafactory dataset create   --factory-name <adf> -g <rg> --dataset-name SilverContainerDataset --properties @infra/adf/dataset_silver_container.json
-   az datafactory pipeline create  --factory-name <adf> -g <rg> --pipeline-name nlp_pipeline_nightly  --pipeline    @infra/adf/pipeline_nlp_nightly.json
-   az datafactory trigger create   --factory-name <adf> -g <rg> --trigger-name NightlyScheduleTrigger --properties @infra/adf/trigger_nightly_schedule.json
-   az datafactory trigger start    --factory-name <adf> -g <rg> --trigger-name NightlyScheduleTrigger
-   ```
-10. Deploy `infra/modules/apim.bicep` + apply policies
-11. Deploy `infra/modules/purview.bicep` + configure scans
-12. Run `scripts/test-pipeline.js` (end-to-end smoke test)
+```bash
+# Jest unit tests (187 tests across 8 suites)
+cd nlp-pipeline
+node_modules/.bin/jest --config functions/jest.config.json
 
----
+# Smoke test — unit mode (64 assertions, no Azure needed)
+node scripts/test-pipeline.js
 
-## 11. README Outline (what the submission README must cover)
-
-1. **Architecture overview** — diagram + 2-paragraph description
-2. **Design decisions** — numbered ADR list (from section 2 above)
-3. **Prerequisites** — Azure subscription, Node.js 18+, Azure CLI, Azurite
-4. **Environment setup** — copy `.env.example`, fill in values
-5. **Local development** — step-by-step with Azurite
-6. **Deployment** — `az deployment group create` commands in order
-7. **Running the pipeline** — trigger Logic App / use test script
-8. **Search API usage** — `curl` examples with JWT
-9. **Monitoring** — Application Insights queries + ADF monitoring
-10. **Known limitations** — NewsAPI 100 req/day, free Search tier limits, no Databricks in local dev
-
----
-
-## 12. Critical Edge Cases to Handle in Code
-
-1. **Article with no `content` field from NewsAPI** — use `description` as fallback, flag `contentTruncated: true`
-2. **Language API: 10-doc batch limit** — chunk articles array into groups of 10 before calling
-3. **OpenAI: empty string input** — skip embedding, set `content_vector: null`, mark `vectorStatus: "empty_content"`
-4. **Dedup across Logic App runs** — Table Storage entity: PartitionKey=`urlHash[:2]`, RowKey=`urlHash`
-5. **AI Search: 1000-doc batch upsert limit** — chunk silver folder files into batches of 1000
-6. **`_ts` timestamp for idempotent gold writes** — Databricks MERGE on `url_hash` as key, REPLACE WHERE on date partition
-7. **APIM caching + near-real-time indexing** — 60s TTL acceptable; document this in README
-8. **Purview PII flag** — Language API entity category `"Person"` + pattern match for email/phone → custom classification
-
----
-
-*This plan is the source of truth for all implementation. No implementation begins without every section above being confirmed.*
+# Smoke test — integration mode (requires .env with live credentials)
+node scripts/test-pipeline.js --integration
+```
