@@ -1,0 +1,131 @@
+{
+  "classificationRules": [
+
+    {
+      "name": "NLP_Pipeline_PII_Article",
+      "friendlyName": "NLP Pipeline — PII Article",
+      "description": "Flags articles where the NLP enrichment step detected PII entities (Person, PhoneNumber, or Email categories from Azure Cognitive Services Language API). The hasPii field in the silver layer JSON is set to true for these articles.",
+      "classificationAction": "Label",
+      "ruleStatus": "Enabled",
+      "kind": "Custom",
+      "dataSources": ["AzureBlob", "AzureDataLakeStorageGen2"],
+
+      "columnPatterns": [],
+
+      "dataPatterns": [
+        {
+          "kind": "Regex",
+          "pattern": "\"hasPii\"\\s*:\\s*true",
+          "minimumPresence": 1,
+          "description": "Matches silver layer JSON blobs where hasPii is true — set by fn-enrich when Language API detects Person, PhoneNumber, or Email entities"
+        }
+      ],
+
+      "sensitivityLabel": {
+        "name": "Confidential",
+        "description": "Applied to articles containing named individuals, phone numbers, or email addresses"
+      },
+
+      "comment": "This rule scans blob content, not column values — configured for JSON file scanning on the silver container. Applied during nightly Purview scan of articles-silver."
+    },
+
+    {
+      "name": "NLP_Pipeline_Person_Entity",
+      "friendlyName": "NLP Pipeline — Named Person",
+      "description": "Flags articles containing named persons detected by Language API NER. Targets the entities array in silver layer JSON.",
+      "classificationAction": "Label",
+      "ruleStatus": "Enabled",
+      "kind": "Custom",
+      "dataSources": ["AzureBlob", "AzureDataLakeStorageGen2"],
+
+      "columnPatterns": [],
+
+      "dataPatterns": [
+        {
+          "kind": "Regex",
+          "pattern": "\"category\"\\s*:\\s*\"Person\"",
+          "minimumPresence": 1,
+          "description": "Matches silver JSON blobs containing at least one entity of category Person"
+        }
+      ],
+
+      "sensitivityLabel": {
+        "name": "Confidential",
+        "description": "Article contains named individuals identified by NER"
+      }
+    },
+
+    {
+      "name": "NLP_Pipeline_Phone_Pattern",
+      "friendlyName": "NLP Pipeline — Phone Number Pattern",
+      "description": "Secondary pattern-based rule — catches phone numbers in article content that Language API may have missed. Applies to both bronze (raw NewsAPI content) and silver layers.",
+      "classificationAction": "Label",
+      "ruleStatus": "Enabled",
+      "kind": "Custom",
+      "dataSources": ["AzureBlob", "AzureDataLakeStorageGen2"],
+
+      "columnPatterns": [],
+
+      "dataPatterns": [
+        {
+          "kind": "Regex",
+          "pattern": "\\b(\\+?1[-\\s.]?)?\\(?[0-9]{3}\\)?[-\\s.]?[0-9]{3}[-\\s.]?[0-9]{4}\\b",
+          "minimumPresence": 1,
+          "description": "US/international phone number pattern — E.164 and common formats"
+        }
+      ],
+
+      "sensitivityLabel": {
+        "name": "Confidential",
+        "description": "Content contains phone number patterns"
+      }
+    },
+
+    {
+      "name": "NLP_Pipeline_Email_Pattern",
+      "friendlyName": "NLP Pipeline — Email Address Pattern",
+      "description": "Pattern-based email detection across bronze and silver layers.",
+      "classificationAction": "Label",
+      "ruleStatus": "Enabled",
+      "kind": "Custom",
+      "dataSources": ["AzureBlob", "AzureDataLakeStorageGen2"],
+
+      "columnPatterns": [],
+
+      "dataPatterns": [
+        {
+          "kind": "Regex",
+          "pattern": "\\b[A-Za-z0-9._%+\\-]+@[A-Za-z0-9.\\-]+\\.[A-Za-z]{2,}\\b",
+          "minimumPresence": 1,
+          "description": "Standard RFC 5322 email address pattern"
+        }
+      ],
+
+      "sensitivityLabel": {
+        "name": "Confidential",
+        "description": "Content contains email address patterns"
+      }
+    }
+
+  ],
+
+  "sensitivityLabels": [
+    {
+      "name": "Public",
+      "description": "Publicly available news content with no PII detected",
+      "order": 1
+    },
+    {
+      "name": "Confidential",
+      "description": "Content containing personally identifiable information — named individuals, phone numbers, or email addresses",
+      "order": 2
+    }
+  ],
+
+  "deploymentNotes": {
+    "howToApply": "Import via Microsoft Purview portal → Data Map → Classifications → New Classification Rule, or via Purview REST API: POST /scan/classificationrules/{name}",
+    "applyTo": ["articles-bronze container", "articles-silver container"],
+    "scanFrequency": "Nightly after ADF pipeline completes",
+    "integrationPoint": "fn-enrich sets hasPii=true in silver docs. Purview scans confirm and build the lineage graph from raw → silver → gold → Search."
+  }
+}

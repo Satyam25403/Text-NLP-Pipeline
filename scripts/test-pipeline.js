@@ -581,6 +581,233 @@ test('stripComments on real schema produces no comment fields', () => {
   assert(!JSON.stringify(cleaned).includes('"comment"'), 'Real schema cleaned');
 });
 
+
+// ─── classification-rules.json ───────────────────────────────────────────────
+console.log('\n── purview/classification-rules.json ──────────────────────────');
+const classificationRules = JSON.parse(fs.readFileSync(
+  path.join(__dirname, '../purview/classification-rules.json'), 'utf-8'
+));
+
+test('Classification rules file parses as valid JSON', () => {
+  assert(Array.isArray(classificationRules.classificationRules), 'classificationRules is array');
+});
+
+test('Has exactly 4 classification rules', () => {
+  assert(classificationRules.classificationRules.length === 4,
+    'Expected 4 rules, got ' + classificationRules.classificationRules.length);
+});
+
+test('NLP_Pipeline_PII_Article rule exists and targets hasPii:true pattern', () => {
+  const rule = classificationRules.classificationRules
+    .find(r => r.name === 'NLP_Pipeline_PII_Article');
+  assertNotNull(rule, 'NLP_Pipeline_PII_Article rule');
+  const pattern = rule.dataPatterns[0].pattern;
+  assert(pattern.includes('hasPii'), 'hasPii in pattern');
+  assert(pattern.includes('true'), 'true value in pattern');
+});
+
+test('NLP_Pipeline_Person_Entity rule targets Person category', () => {
+  const rule = classificationRules.classificationRules
+    .find(r => r.name === 'NLP_Pipeline_Person_Entity');
+  assertNotNull(rule, 'NLP_Pipeline_Person_Entity rule');
+  assert(rule.dataPatterns[0].pattern.includes('Person'), 'Person in pattern');
+});
+
+test('Phone and Email pattern rules exist', () => {
+  const names = classificationRules.classificationRules.map(r => r.name);
+  assert(names.includes('NLP_Pipeline_Phone_Pattern'), 'Phone rule present');
+  assert(names.includes('NLP_Pipeline_Email_Pattern'), 'Email rule present');
+});
+
+test('All rules are Enabled', () => {
+  classificationRules.classificationRules.forEach(r => {
+    assertEqual(r.ruleStatus, 'Enabled', 'Rule ' + r.name + ' must be Enabled');
+  });
+});
+
+test('All rules target ADLS Gen2 and AzureBlob data sources', () => {
+  classificationRules.classificationRules.forEach(r => {
+    assert(r.dataSources.includes('AzureDataLakeStorageGen2'), r.name + ' targets ADLS');
+    assert(r.dataSources.includes('AzureBlob'), r.name + ' targets AzureBlob');
+  });
+});
+
+test('Sensitivity labels defined (Public and Confidential)', () => {
+  assert(Array.isArray(classificationRules.sensitivityLabels), 'sensitivityLabels array');
+  const labelNames = classificationRules.sensitivityLabels.map(l => l.name);
+  assert(labelNames.includes('Public'), 'Public label');
+  assert(labelNames.includes('Confidential'), 'Confidential label');
+});
+
+test('Confidential label has higher order than Public', () => {
+  const pub  = classificationRules.sensitivityLabels.find(l => l.name === 'Public');
+  const conf = classificationRules.sensitivityLabels.find(l => l.name === 'Confidential');
+  assert(conf.order > pub.order, 'Confidential order > Public order');
+});
+
+test('PII rule regex matches hasPii:true (with and without spaces)', () => {
+  const rule    = classificationRules.classificationRules
+    .find(r => r.name === 'NLP_Pipeline_PII_Article');
+  const pattern = new RegExp(rule.dataPatterns[0].pattern);
+  assert(pattern.test('"hasPii": true'),  'matches hasPii: true');
+  assert(pattern.test('"hasPii":true'),   'matches hasPii:true (no space)');
+  assert(!pattern.test('"hasPii": false'), 'does not match hasPii: false');
+  assert(!pattern.test('"hasPii":false'),  'does not match hasPii:false (no space)');
+});
+
+test('Email pattern regex matches valid email addresses', () => {
+  const rule    = classificationRules.classificationRules
+    .find(r => r.name === 'NLP_Pipeline_Email_Pattern');
+  const pattern = new RegExp(rule.dataPatterns[0].pattern);
+  assert(pattern.test('user@example.com'),        'standard email');
+  assert(pattern.test('user.name+tag@domain.co'), 'complex email');
+  assert(!pattern.test('notanemail'),              'rejects plain word');
+  assert(!pattern.test('@nodomain'),               'rejects no local part');
+});
+
+test('Phone pattern regex matches common US formats', () => {
+  const rule    = classificationRules.classificationRules
+    .find(r => r.name === 'NLP_Pipeline_Phone_Pattern');
+  const pattern = new RegExp(rule.dataPatterns[0].pattern);
+  assert(pattern.test('555-867-5309'),    'dashes format');
+  assert(pattern.test('(555) 867-5309'),  'parens format');
+  assert(pattern.test('+1 555 867 5309'), 'E.164 format');
+});
+
+// ─── scan-config.json ─────────────────────────────────────────────────────────
+console.log('\n── purview/scan-config.json ────────────────────────────────────');
+const scanConfig = JSON.parse(fs.readFileSync(
+  path.join(__dirname, '../purview/scan-config.json'), 'utf-8'
+));
+
+test('Scan config parses as valid JSON with scans and dataSources', () => {
+  assert(Array.isArray(scanConfig.scans), 'scans is array');
+  assert(Array.isArray(scanConfig.dataSources), 'dataSources is array');
+});
+
+test('Has exactly 4 scan definitions', () => {
+  assertEqual(scanConfig.scans.length, 4, 'Expected 4 scans');
+});
+
+test('Bronze+Silver scan applies all 4 custom classification rules', () => {
+  const scan = scanConfig.scans.find(s => s.name === 'scan-bronze-silver');
+  assertNotNull(scan, 'scan-bronze-silver');
+  const rules = scan.scanRuleSet.classificationRules;
+  [
+    'NLP_Pipeline_PII_Article',
+    'NLP_Pipeline_Person_Entity',
+    'NLP_Pipeline_Phone_Pattern',
+    'NLP_Pipeline_Email_Pattern',
+  ].forEach(r => assert(rules.includes(r), r + ' in bronze/silver scan'));
+});
+
+test('Bronze+Silver scan scopes both containers', () => {
+  const scan      = scanConfig.scans.find(s => s.name === 'scan-bronze-silver');
+  const scopeStr  = JSON.stringify(scan.scope);
+  assert(scopeStr.includes('articles-bronze'), 'bronze in scope');
+  assert(scopeStr.includes('articles-silver'), 'silver in scope');
+});
+
+test('Bronze+Silver scan runs on daily schedule', () => {
+  const scan = scanConfig.scans.find(s => s.name === 'scan-bronze-silver');
+  assertEqual(scan.trigger.type, 'Schedule', 'trigger type');
+  assertEqual(scan.trigger.recurrence.frequency, 'Day', 'daily frequency');
+});
+
+test('Search index scan exists and targets AzureCognitiveSearch', () => {
+  const scan = scanConfig.scans.find(s => s.name === 'scan-search-index');
+  assertNotNull(scan, 'scan-search-index');
+  assertEqual(scan.dataSourceType, 'AzureCognitiveSearch', 'Search type');
+});
+
+test('Gold scan applies no custom PII classification rules (aggregated data only)', () => {
+  const scan = scanConfig.scans.find(s => s.name === 'scan-gold');
+  assertNotNull(scan, 'scan-gold');
+  assertEqual(scan.scanRuleSet.classificationRules.length, 0,
+    'Gold scan must have no custom classification rules');
+});
+
+test('All scan dataSourceName values reference a defined dataSource', () => {
+  const sourceNames = new Set(scanConfig.dataSources.map(s => s.name));
+  scanConfig.scans.forEach(scan => {
+    assert(sourceNames.has(scan.dataSourceName),
+      'Scan ' + scan.name + ' references undefined source: ' + scan.dataSourceName);
+  });
+});
+
+test('All 3 data source kinds are defined', () => {
+  const kinds = scanConfig.dataSources.map(s => s.kind);
+  assert(kinds.includes('AzureDataLakeStorageGen2'), 'ADLS source defined');
+  assert(kinds.includes('AzureCognitiveSearch'), 'Search source defined');
+  assert(kinds.includes('AzureStorage'), 'Table Storage source defined');
+});
+
+test('Scan schedule times are after ADF pipeline completes (03:30 UTC+)', () => {
+  const bronzeSilver = scanConfig.scans.find(s => s.name === 'scan-bronze-silver');
+  const startTime    = bronzeSilver.trigger.recurrence.startTime;
+  const hour         = parseInt(startTime.split('T')[1].split(':')[0], 10);
+  // ADF runs at 02:00 UTC, finishes by 03:00 — scan must start at 03:30 or later
+  assert(hour >= 3, 'Bronze/silver scan must start after 03:00 UTC (after ADF)');
+});
+
+// ─── hasPii pipeline integration ─────────────────────────────────────────────
+console.log('\n── Layer 6: hasPii pipeline contract ───────────────────────────');
+// hasPii already imported in Section 4
+
+test('hasPii=true when Person entity present', () => {
+  assert(hasPii([{ category: 'Person' }]) === true, 'Person triggers hasPii');
+});
+
+test('hasPii=true when PhoneNumber entity present', () => {
+  assert(hasPii([{ category: 'PhoneNumber' }]) === true, 'PhoneNumber triggers hasPii');
+});
+
+test('hasPii=true when Email entity present', () => {
+  assert(hasPii([{ category: 'Email' }]) === true, 'Email triggers hasPii');
+});
+
+test('hasPii=false when only non-PII entities present', () => {
+  assert(hasPii([
+    { category: 'Organization' },
+    { category: 'Location' },
+    { category: 'DateTime' },
+  ]) === false, 'Non-PII entities do not trigger hasPii');
+});
+
+test('Purview PII rule and fn-enrich hasPii are aligned end-to-end', () => {
+  // The Purview rule scans silver blobs for "hasPii": true.
+  // fn-enrich sets hasPii via languageClient.hasPii().
+  // This test verifies the full contract:
+  //   Language API Person/Phone/Email → hasPii=true → silver JSON → Purview flags blob.
+  const piiRule    = classificationRules.classificationRules
+    .find(r => r.name === 'NLP_Pipeline_PII_Article');
+  const piiPattern = new RegExp(piiRule.dataPatterns[0].pattern);
+
+  const PII_CATEGORIES = ['Person', 'PhoneNumber', 'Email'];
+  PII_CATEGORIES.forEach(cat => {
+    // Step 1: Language API entity → hasPii flag
+    const flag = hasPii([{ category: cat }]);
+    assert(flag === true, cat + ' must set hasPii=true');
+
+    // Step 2: hasPii=true in silver JSON → Purview classification rule matches
+    const silverJson = JSON.stringify({ id: 'abc123', hasPii: flag });
+    assert(piiPattern.test(silverJson),
+      cat + ' -> hasPii=true -> Purview rule matches silver JSON');
+  });
+});
+
+test('Non-PII entities do not trigger Purview classification', () => {
+  const piiRule    = classificationRules.classificationRules
+    .find(r => r.name === 'NLP_Pipeline_PII_Article');
+  const piiPattern = new RegExp(piiRule.dataPatterns[0].pattern);
+
+  const flag       = hasPii([{ category: 'Organization' }]);
+  const silverJson = JSON.stringify({ id: 'abc123', hasPii: flag });
+
+  assert(flag === false, 'Organization must not set hasPii=true');
+  assert(!piiPattern.test(silverJson), 'hasPii=false must not match Purview rule');
+});
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // INTEGRATION TESTS (only run with --integration flag)
 // ═══════════════════════════════════════════════════════════════════════════════

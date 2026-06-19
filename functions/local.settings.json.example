@@ -37,6 +37,13 @@
     "DATABRICKS_TOKEN": "<your-databricks-pat>",
     "DATABRICKS_CLUSTER_ID": "<your-cluster-id>",
 
-    "APPINSIGHTS_INSTRUMENTATIONKEY": "<your-app-insights-key>"
+    "APPINSIGHTS_INSTRUMENTATIONKEY": "<your-app-insights-key>",
+
+    "PURVIEW_ENDPOINT": "https://<your-purview-account>.purview.azure.com",
+    "PURVIEW_CLIENT_ID": "<azure-ad-app-client-id>",
+    "PURVIEW_CLIENT_SECRET": "<azure-ad-app-client-secret>",
+    "PURVIEW_TENANT_ID": "<azure-tenant-id>",
+    "STORAGE_ACCOUNT_NAME": "<your-storage-account-name>",
+    "SEARCH_SERVICE_NAME": "<your-search-service-name>"
   }
 }
