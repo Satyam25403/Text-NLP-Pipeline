@@ -1,0 +1,13 @@
+{
+  "name": "nlp-pipeline-functions",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "@azure/ai-text-analytics": "^5.1.0",
+    "@azure/data-tables": "^13.2.2",
+    "@azure/search-documents": "^12.0.0",
+    "@azure/storage-blob": "^12.17.0",
+    "axios": "^1.6.0",
+    "dotenv": "^16.3.1"
+  }
+}

@@ -1,0 +1,123 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+
+  "parameters": {
+
+    "location": {
+      "value": "eastus",
+      "comment": "Azure region. Choose based on data residency requirements. eastus has broadest service availability."
+    },
+
+    "storageAccountName": {
+      "value": "nlppipelinestore",
+      "comment": "3-24 lowercase alphanumeric only. Must be globally unique. Change 'nlppipeline' prefix to something unique."
+    },
+
+    "languageAccountName": {
+      "value": "nlp-pipeline-language",
+      "comment": "Cognitive Services Language API account name."
+    },
+
+    "openAiAccountName": {
+      "value": "nlp-pipeline-openai",
+      "comment": "Azure OpenAI account name. Must be approved for OpenAI access in your subscription."
+    },
+
+    "embeddingDeploymentName": {
+      "value": "text-embedding-ada-002",
+      "comment": "Name of the ada-002 deployment. Must match OPENAI_EMBEDDING_DEPLOYMENT env var and functions.bicep."
+    },
+
+    "functionAppName": {
+      "value": "nlp-pipeline-functions",
+      "comment": "Function App name. Must be globally unique (becomes <name>.azurewebsites.net)."
+    },
+
+    "searchServiceName": {
+      "value": "nlp-pipeline-search",
+      "comment": "Azure AI Search service name. Must be globally unique (becomes <name>.search.windows.net)."
+    },
+
+    "skuName": {
+      "value": "basic",
+      "comment": "Search SKU: 'free' for dev (50MB, no SLA, 1 per subscription), 'basic' for production (2GB, SLA)."
+    },
+
+    "replicaCount": {
+      "value": 1,
+      "comment": "Search replicas. 1 for dev/staging. Set to 2+ for HA in production."
+    },
+
+    "partitionCount": {
+      "value": 1,
+      "comment": "Search partitions. 1 is sufficient for up to ~50K articles at basic tier."
+    },
+
+    "workspaceName": {
+      "value": "nlp-pipeline-databricks",
+      "comment": "Databricks workspace name."
+    },
+
+    "pricingTier": {
+      "value": "standard",
+      "comment": "Databricks tier: 'standard' or 'premium'. Premium required for Delta Live Tables and row-level security."
+    },
+
+    "logicAppName": {
+      "value": "nlp-pipeline-ingestor",
+      "comment": "Logic App name for the NewsAPI ingestion workflow."
+    },
+
+    "apimName": {
+      "value": "nlp-pipeline-apim",
+      "comment": "APIM instance name. Must be globally unique (becomes <name>.azure-api.net)."
+    },
+
+    "publisherEmail": {
+      "value": "<your-email@domain.com>",
+      "comment": "REQUIRED: Replace with your email. APIM sends alerts to this address."
+    },
+
+    "publisherName": {
+      "value": "NLP Pipeline Team",
+      "comment": "Organisation name shown in the APIM developer portal."
+    },
+
+    "purviewAccountName": {
+      "value": "nlp-pipeline-purview",
+      "comment": "Purview account name. Must be globally unique."
+    },
+
+    "ingestCategories": {
+      "value": "technology,business,science,health",
+      "comment": "Comma-separated NewsAPI categories. Must match INGEST_CATEGORIES env var and Logic App ingestCategories param. Add categories here to expand coverage — rate limit is 100 req/day so max 25 categories at 4 polls/day."
+    },
+
+    "tenantId": {
+      "value": "<your-azure-ad-tenant-id>",
+      "comment": "REQUIRED: Azure AD tenant ID for JWT validation in APIM inbound policy."
+    },
+
+    "apiAppIdUri": {
+      "value": "api://<your-api-app-registration-id>",
+      "comment": "REQUIRED: Azure AD application ID URI for JWT audience validation. Create an App Registration for the Search API first."
+    },
+
+    "bronzeContainerName": {
+      "value": "articles-bronze",
+      "comment": "Must match BLOB_CONTAINER_BRONZE env var."
+    },
+
+    "searchIndexName": {
+      "value": "articles",
+      "comment": "Must match SEARCH_INDEX_NAME env var and search/index-schema.json name field."
+    },
+
+    "secretsComment": {
+      "value": "SECRETS NOT IN THIS FILE",
+      "comment": "The following parameters are @secure() in Bicep and must be passed at deploy time via --parameters flag or Key Vault references, NOT stored here: storageConnectionString, appInsightsInstrumentationKey, newsApiKey, languageApiKey, openAiApiKey, searchApiKey, hashFunctionKey, searchApiFunctionKey, nlpTriggerFunctionKey, auditLoggerFunctionKey, hashFunctionKey. See deployment.md for Key Vault reference pattern."
+    }
+
+  }
+}
