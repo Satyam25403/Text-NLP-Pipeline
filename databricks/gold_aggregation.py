@@ -30,6 +30,26 @@ from pyspark.sql import functions as F
 from pyspark.sql.window import Window
 from pyspark.sql.types import StringType, DoubleType
 
+# Shared helpers from utils/delta_helpers.py
+# Provides: overwrite_partition, rolling_window_filter, assert_silver_schema, log_data_quality, safe_explode_entities
+try:
+    from utils.delta_helpers import (
+        overwrite_partition,
+        assert_silver_schema,
+        log_data_quality,
+        safe_explode_entities,
+    )
+except ImportError:
+    # Fallback for local testing outside Databricks Repos
+    import sys, os
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'utils'))
+    from delta_helpers import (
+        overwrite_partition,
+        assert_silver_schema,
+        log_data_quality,
+        safe_explode_entities,
+    )
+
 # ── Parameters ──────────────────────────────────────────────────────────────
 run_date_str   = dbutils.widgets.get("run_date").strip()
 silver_root    = dbutils.widgets.get("silver_root").rstrip("/")
@@ -96,7 +116,7 @@ silver = silver.select(
     F.col("id"),
     F.col("category").alias("category"),
     F.col("_date").alias("article_date"),
-    F.col("published_at"),
+    F.col("publishedAt").alias("published_at"),  # silver writes publishedAt (camelCase); alias to snake_case for gold
     F.col("sentiment.label").alias("sentiment_label"),
     F.col("sentiment.scores.positive").cast(DoubleType()).alias("sentiment_positive"),
     F.col("sentiment.scores.negative").cast(DoubleType()).alias("sentiment_negative"),
@@ -106,8 +126,15 @@ silver = silver.select(
     F.col("nlpStatus"),
 ).filter(F.col("nlpStatus") == "ok")  # only use successfully enriched articles
 
+# Validate silver schema before any aggregation — catches field renames early
+# with a clear error instead of a cryptic Spark NullPointerException
+assert_silver_schema(silver)
+
 total_articles = silver.count()
 print(f"Total articles loaded (nlpStatus=ok): {total_articles}")
+
+# Quick data quality summary — flags high NLP failure rates before wasting compute
+log_data_quality(silver, "silver-window")
 
 # COMMAND ----------
 
@@ -136,13 +163,9 @@ sentiment_trends = (
     .orderBy("category", "article_date")
 )
 
-sentiment_out = f"{gold_root}/sentiment_trends/{run_date_str}"
-(
-    sentiment_trends.write
-    .mode("overwrite")                         # idempotent: REPLACE WHERE this date
-    .json(sentiment_out)
-)
-print(f"Sentiment trends written → {sentiment_out} ({sentiment_trends.count()} rows)")
+sentiment_out = f"{gold_root}/sentiment_trends"
+overwrite_partition(sentiment_trends, sentiment_out, partition_col="run_date", partition_value=run_date_str)
+print(f"Sentiment trends written → {sentiment_out}/{run_date_str} ({sentiment_trends.count()} rows)")
 
 # COMMAND ----------
 
@@ -183,13 +206,9 @@ top_entities = (
     .orderBy("category", "rank")
 )
 
-entities_out = f"{gold_root}/top_entities/{run_date_str}"
-(
-    top_entities.write
-    .mode("overwrite")
-    .json(entities_out)
-)
-print(f"Top entities written → {entities_out} ({top_entities.count()} rows)")
+entities_out = f"{gold_root}/top_entities"
+overwrite_partition(top_entities, entities_out, partition_col="run_date", partition_value=run_date_str)
+print(f"Top entities written → {entities_out}/{run_date_str} ({top_entities.count()} rows)")
 
 # COMMAND ----------
 
@@ -255,13 +274,9 @@ trending_keywords = (
     .orderBy("category", "rank")
 )
 
-keywords_out = f"{gold_root}/trending_keywords/{run_date_str}"
-(
-    trending_keywords.write
-    .mode("overwrite")
-    .json(keywords_out)
-)
-print(f"Trending keywords written → {keywords_out} ({trending_keywords.count()} rows)")
+keywords_out = f"{gold_root}/trending_keywords"
+overwrite_partition(trending_keywords, keywords_out, partition_col="run_date", partition_value=run_date_str)
+print(f"Trending keywords written → {keywords_out}/{run_date_str} ({trending_keywords.count()} rows)")
 
 # COMMAND ----------
 

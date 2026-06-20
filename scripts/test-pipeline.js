@@ -809,6 +809,136 @@ test('Non-PII entities do not trigger Purview classification', () => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// SECTION 13 — Databricks gold_aggregation.py + delta_helpers.py wiring
+// ═══════════════════════════════════════════════════════════════════════════════
+console.log('\n── databricks/gold_aggregation.py wiring ───────────────────────');
+const goldSrc = fs.readFileSync(path.join(__dirname, '../databricks/gold_aggregation.py'), 'utf-8');
+
+test('gold_aggregation imports from utils.delta_helpers', () => {
+  assert(goldSrc.includes('from utils.delta_helpers import'), 'missing delta_helpers import');
+});
+
+test('gold_aggregation imports overwrite_partition', () => {
+  assert(goldSrc.includes('overwrite_partition'), 'overwrite_partition not imported');
+});
+
+test('gold_aggregation imports assert_silver_schema', () => {
+  assert(goldSrc.includes('assert_silver_schema'), 'assert_silver_schema not imported');
+});
+
+test('gold_aggregation imports log_data_quality', () => {
+  assert(goldSrc.includes('log_data_quality'), 'log_data_quality not imported');
+});
+
+test('gold_aggregation calls assert_silver_schema before any aggregation', () => {
+  const importIdx     = goldSrc.indexOf('from utils.delta_helpers import');
+  const assertIdx     = goldSrc.indexOf('assert_silver_schema(silver)');
+  const sentiment_idx = goldSrc.indexOf('Gold 1: Sentiment Trends');
+  assert(assertIdx > importIdx,     'assert_silver_schema called after import');
+  assert(assertIdx < sentiment_idx, 'assert_silver_schema called before Gold 1 aggregation');
+});
+
+test('gold_aggregation calls log_data_quality after loading silver', () => {
+  const totalIdx = goldSrc.indexOf('total_articles = silver.count()');
+  const logIdx   = goldSrc.indexOf('log_data_quality(silver');
+  assert(logIdx > totalIdx, 'log_data_quality called after silver.count()');
+});
+
+test('gold_aggregation uses overwrite_partition for all 3 gold outputs (no inline .mode)', () => {
+  // No raw .mode("overwrite") should remain — all replaced by overwrite_partition()
+  const modeLines = goldSrc.split('\n').filter(l =>
+    l.includes('.mode(') && !l.trim().startsWith('#')
+  );
+  assert(modeLines.length === 0, 'Inline .mode() still present: ' + modeLines.join(' | '));
+});
+
+test('gold_aggregation uses overwrite_partition for sentiment_trends output', () => {
+  assert(goldSrc.includes('overwrite_partition(sentiment_trends'), 'sentiment_trends uses overwrite_partition');
+});
+
+test('gold_aggregation uses overwrite_partition for top_entities output', () => {
+  assert(goldSrc.includes('overwrite_partition(top_entities'), 'top_entities uses overwrite_partition');
+});
+
+test('gold_aggregation uses overwrite_partition for trending_keywords output', () => {
+  assert(goldSrc.includes('overwrite_partition(trending_keywords'), 'trending_keywords uses overwrite_partition');
+});
+
+test('gold_aggregation has fallback import for local testing outside Databricks', () => {
+  assert(goldSrc.includes('except ImportError'), 'no ImportError fallback for local testing');
+  assert(goldSrc.includes('sys.path.insert'),   'no sys.path fallback');
+});
+
+test('publishedAt correctly aliased to published_at for gold layer', () => {
+  assert(goldSrc.includes('F.col("publishedAt").alias("published_at")'),
+    'publishedAt alias missing — Spark reads camelCase from silver, writes snake_case to gold');
+  assert(!goldSrc.split('\n').some(l =>
+    l.includes('F.col("published_at")') && !l.trim().startsWith('#')
+  ), 'raw F.col("published_at") still present — will silently null on case-sensitive JSON read');
+});
+
+console.log('\n── databricks/utils/delta_helpers.py structure ─────────────────');
+const helpersSrc = fs.readFileSync(
+  path.join(__dirname, '../databricks/utils/delta_helpers.py'), 'utf-8'
+);
+
+test('delta_helpers.py defines overwrite_partition', () => {
+  assert(helpersSrc.includes('def overwrite_partition('), 'overwrite_partition missing');
+});
+
+test('delta_helpers.py defines assert_silver_schema', () => {
+  assert(helpersSrc.includes('def assert_silver_schema('), 'assert_silver_schema missing');
+});
+
+test('delta_helpers.py defines log_data_quality', () => {
+  assert(helpersSrc.includes('def log_data_quality('), 'log_data_quality missing');
+});
+
+test('delta_helpers.py defines rolling_window_filter', () => {
+  assert(helpersSrc.includes('def rolling_window_filter('), 'rolling_window_filter missing');
+});
+
+test('delta_helpers.py defines prior_window_filter', () => {
+  assert(helpersSrc.includes('def prior_window_filter('), 'prior_window_filter missing');
+});
+
+test('delta_helpers.py defines safe_explode_entities', () => {
+  assert(helpersSrc.includes('def safe_explode_entities('), 'safe_explode_entities missing');
+});
+
+test('delta_helpers.py defines merge_into_delta', () => {
+  assert(helpersSrc.includes('def merge_into_delta('), 'merge_into_delta missing');
+});
+
+test('assert_silver_schema checks publishedAt (camelCase) not published_at', () => {
+  // The schema check must match the actual silver field name
+  assert(helpersSrc.includes('"publishedAt"'), 'assert_silver_schema must check publishedAt (camelCase)');
+});
+
+console.log('\n── search/ directory: push model, no dead pull-model files ─────');
+
+test('search/ directory contains index-schema.json', () => {
+  assert(fs.existsSync(path.join(__dirname, '../search/index-schema.json')),
+    'index-schema.json missing');
+});
+
+test('indexer.json does not exist (push model — pull indexer not used)', () => {
+  assert(!fs.existsSync(path.join(__dirname, '../search/indexer.json')),
+    'indexer.json exists but should not — pipeline uses push model (mergeOrUploadDocuments)');
+});
+
+test('skillset.json does not exist (push model — built-in skillset not used)', () => {
+  assert(!fs.existsSync(path.join(__dirname, '../search/skillset.json')),
+    'skillset.json exists but should not — NLP enrichment is done in fn-enrich, not Search skillset');
+});
+
+test('PROJECT_PLAN.md documents why indexer.json and skillset.json are absent', () => {
+  const plan = fs.readFileSync(path.join(__dirname, '../docs/PROJECT_PLAN.md'), 'utf-8');
+  assert(plan.includes('push API') || plan.includes('mergeOrUploadDocuments') || plan.includes('intentionally absent'),
+    'PROJECT_PLAN should explain push model design decision');
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // INTEGRATION TESTS (only run with --integration flag)
 // ═══════════════════════════════════════════════════════════════════════════════
 async function runIntegrationTests() {

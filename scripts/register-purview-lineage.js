@@ -126,6 +126,21 @@ function blobContainerEntity(containerName) {
 }
 
 /**
+ * Build a generic external source entity for NewsAPI.
+ * No Azure resource ID — represented as a generic DataSet.
+ */
+function newsApiEntity() {
+  return {
+    typeName: 'DataSet',
+    attributes: {
+      qualifiedName: 'https://newsapi.org/v2/top-headlines',
+      name:          'NewsAPI Top Headlines',
+      description:   'External news data source — polled every 6 hours by Logic App for categories: technology, business, science, health',
+    },
+  };
+}
+
+/**
  * Build an Azure AI Search index entity.
  */
 function searchIndexEntity() {
@@ -143,7 +158,7 @@ function searchIndexEntity() {
  * Build a Process entity representing a custom Azure Function.
  * Process entities represent data transformation steps in the lineage graph.
  */
-function procesEntity({ name, qualifiedName, description, inputs, outputs }) {
+function processEntity({ name, qualifiedName, description, inputs, outputs }) {
   return {
     typeName: 'Process',
     attributes: {
@@ -152,7 +167,7 @@ function procesEntity({ name, qualifiedName, description, inputs, outputs }) {
       description,
       inputs,
       outputs,
-      operationType: 'AzureFunction',
+      // operationType removed — not a standard Atlas Process attribute; causes strict-mode 400
     },
   };
 }
@@ -195,9 +210,45 @@ async function main() {
     process.exit(1);
   }
 
-  // Step 3: Register fn-enrich lineage (bronze → silver)
+  // Step 3: Register Logic App lineage (NewsAPI → bronze)
+  console.log('\nStep 3: Registering Logic App lineage (NewsAPI → bronze)...');
+  const newsApi = newsApiEntity();
+
+  try {
+    await upsertEntities(client, [newsApi]);
+    console.log('  ✓ NewsAPI source entity registered');
+  } catch (err) {
+    console.error('  ✗ NewsAPI entity failed:', err.response?.data ?? err.message);
+    process.exit(1);
+  }
+
+  const logicAppProcess = processEntity({
+    name:          'Logic App — NewsAPI Ingestion',
+    qualifiedName: 'nlp-pipeline://logic-app-ingestor',
+    description:   [
+      'Azure Logic App that polls NewsAPI /v2/top-headlines every 6 hours.',
+      'Iterates categories: technology, business, science, health.',
+      'Computes SHA-256(url)[0:16] via fn-hash-url for dedup key.',
+      'Writes individual article JSON blobs to articles-bronze/{category}/{date}/{urlHash}.json.',
+      'Uses Managed Identity authentication to Azure Blob Storage.',
+    ].join(' '),
+    inputs:  [{ typeName: newsApi.typeName,  uniqueAttributes: { qualifiedName: newsApi.attributes.qualifiedName } }],
+    outputs: [{ typeName: bronze.typeName,   uniqueAttributes: { qualifiedName: bronze.attributes.qualifiedName } }],
+  });
+
+  try {
+    await upsertEntities(client, [logicAppProcess]);
+    console.log('  ✓ Logic App process entity registered');
+    console.log('    NewsAPI ──[Logic App]──► articles-bronze');
+  } catch (err) {
+    console.error('  ✗ Logic App lineage failed:', err.response?.data ?? err.message);
+    process.exit(1);
+  }
+
+  // Step 4: Register fn-enrich lineage (bronze → silver)
+  console.log('\nStep 4: Registering fn-enrich lineage (bronze → silver)...');
   console.log('\nStep 3: Registering fn-enrich lineage (bronze → silver)...');
-  const fnEnrichProcess = procesEntity({
+  const fnEnrichProcess = processEntity({
     name:          'fn-enrich — NLP Enrichment',
     qualifiedName: 'nlp-pipeline://fn-enrich',
     description:   [
@@ -221,9 +272,9 @@ async function main() {
     process.exit(1);
   }
 
-  // Step 4: Register fn-index-refresh lineage (silver → Search)
-  console.log('\nStep 4: Registering fn-index-refresh lineage (silver → Search index)...');
-  const fnIndexProcess = procesEntity({
+  // Step 5: Register fn-index-refresh lineage (silver → Search)
+  console.log('\nStep 5: Registering fn-index-refresh lineage (silver → Search index)...');
+  const fnIndexProcess = processEntity({
     name:          'fn-index-refresh — Search Index Refresh',
     qualifiedName: 'nlp-pipeline://fn-index-refresh',
     description:   [
@@ -246,14 +297,14 @@ async function main() {
     process.exit(1);
   }
 
-  // Step 5: Summary
+  // Step 6: Summary
   console.log('\n' + '='.repeat(50));
-  console.log('Lineage registration complete.');
+  console.log('Lineage registration complete (5 steps).');
   console.log('');
   console.log('Full lineage graph:');
-  console.log('  NewsAPI');
-  console.log('    └─[Logic App]──► articles-bronze');
-  console.log('         └─[fn-enrich]──► articles-silver');
+  console.log('  NewsAPI (https://newsapi.org)');
+  console.log('    └─[Logic App]──────────► articles-bronze');
+  console.log('         └─[fn-enrich]──────► articles-silver');
   console.log('              ├─[ADF/Databricks]──► articles-gold');
   console.log('              └─[fn-index-refresh]──► articles (Search index)');
   console.log('');
